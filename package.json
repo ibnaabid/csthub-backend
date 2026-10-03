@@ -12,10 +12,12 @@
   "type": "commonjs",
   "dependencies": {
     "@better-auth/mongo-adapter": "^1.7.7",
+    "@google/genai": "^2.27.0",
     "cors": "^2.8.6",
     "dotenv": "^18.0.5",
     "express": "^5.2.1",
     "mongodb": "^7.7.0",
-    "multer": "^2.4.0"
+    "multer": "^2.4.0",
+    "socket.io": "^4.8.4"
   }
 }

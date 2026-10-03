@@ -1,5 +1,7 @@
-
 const dotenv = require("dotenv");
+
+
+
 dotenv.config();
 
 const express = require("express");
@@ -7,6 +9,12 @@ const cors = require("cors");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
+
+const http = require("http");
+const { Server } = require("socket.io");
+
+const { GoogleGenAI } = require("@google/genai");
 
 const {
   MongoClient,
@@ -29,6 +37,7 @@ app.use(
     limit: "60mb",
   })
 );
+
 // =========================================================
 // UPLOAD FOLDER
 // =========================================================
@@ -41,7 +50,6 @@ if (!fs.existsSync(uploadDir)) {
   });
 }
 
-
 // =========================================================
 // SERVE UPLOADED FILES
 // =========================================================
@@ -51,9 +59,447 @@ app.use(
   express.static(uploadDir)
 );
 
+// =========================================================
+// GEMINI AI
+// =========================================================
+
+const geminiClient = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY,
+});
 
 // =========================================================
-// MULTER CONFIGURATION
+// AI IMAGE MULTER
+// =========================================================
+
+const aiUpload = multer({
+  storage: multer.memoryStorage(),
+
+  limits: {
+    fileSize: 10 * 1024 * 1024,
+  },
+
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = [
+      "image/jpeg",
+      "image/png",
+      "image/webp",
+    ];
+
+    if (!allowedTypes.includes(file.mimetype)) {
+      return cb(
+        new Error(
+          "Only JPG, PNG and WEBP images are allowed!"
+        )
+      );
+    }
+
+    cb(null, true);
+  },
+});
+
+// =========================================================
+// GEMINI AI IMAGE ASSISTANT
+// =========================================================
+
+// =========================================================
+// GEMINI AI IMAGE ASSISTANT
+// =========================================================
+
+app.post(
+  "/api/ai/explain-image",
+  aiUpload.single("image"),
+  async (req, res) => {
+    let tempFilePath = null;
+
+    try {
+      // -----------------------------------------------------
+      // CHECK IMAGE
+      // -----------------------------------------------------
+
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          message: "Please upload an image.",
+        });
+      }
+
+      // -----------------------------------------------------
+      // STUDENT QUESTION
+      // -----------------------------------------------------
+
+      const question =
+        req.body.question?.trim() ||
+        "এই ছবিটা সহজভাবে বুঝিয়ে দাও।";
+
+      console.log("📷 Image received:", req.file.originalname);
+      console.log("❓ Question:", question);
+
+      // =====================================================
+      // 🧪 MOCK MODE
+      // =====================================================
+      // .env এ MOCK_GEMINI=true থাকলে আসল Gemini call হবে না।
+      // এতে তুমি frontend + backend পুরোপুরি test করতে পারবে।
+      // =====================================================
+
+      if (process.env.MOCK_GEMINI === "true") {
+        console.log(
+          "🧪 MOCK GEMINI MODE: Gemini API is NOT being called."
+        );
+
+        // Gemini-এর মতো একটু delay
+        await new Promise((resolve) =>
+          setTimeout(resolve, 1500)
+        );
+
+        return res.status(200).json({
+          success: true,
+          answer: `🤖 CST HUB AI — Test Response
+
+📌 ছবিতে কী আছে
+
+তোমার image successfully backend-এ এসেছে।
+
+📖 সহজ ব্যাখ্যা
+
+এখন CST HUB MOCK mode-এ চলছে। তাই এই response টি আসল Gemini থেকে আসেনি।
+
+🔍 বিস্তারিত
+
+Frontend
+↓
+Image Upload
+↓
+FormData
+↓
+Express Backend
+↓
+Multer
+↓
+AI API Route
+↓
+Response
+↓
+Frontend
+
+এই পুরো connection successfully কাজ করছে।
+
+❓ তোমার প্রশ্ন:
+
+${question}
+
+✅ Test Result
+
+Image upload        ✓
+Question received   ✓
+Backend API         ✓
+Multer              ✓
+Response            ✓
+Frontend display    ✓
+
+💡 মনে রাখার বিষয়
+
+Gemini API quota reset হওয়ার পরে .env-এ
+
+MOCK_GEMINI=false
+
+করলেই আসল Gemini AI চালু হবে।`,
+        });
+      }
+
+      // =====================================================
+      // REAL GEMINI MODE
+      // =====================================================
+
+      console.log(
+        "🤖 REAL GEMINI MODE: Calling Gemini API..."
+      );
+
+      // -----------------------------------------------------
+      // CREATE TEMPORARY FILE
+      // -----------------------------------------------------
+
+      const extension =
+        req.file.mimetype === "image/png"
+          ? ".png"
+          : req.file.mimetype === "image/webp"
+          ? ".webp"
+          : ".jpg";
+
+      tempFilePath = path.join(
+        os.tmpdir(),
+        `cst-hub-${Date.now()}${extension}`
+      );
+
+      await fs.promises.writeFile(
+        tempFilePath,
+        req.file.buffer
+      );
+
+      // -----------------------------------------------------
+      // UPLOAD IMAGE TO GEMINI
+      // -----------------------------------------------------
+
+      const uploadedFile =
+        await geminiClient.files.upload({
+          file: tempFilePath,
+          config: {
+            mime_type: req.file.mimetype,
+          },
+        });
+
+      console.log(
+        "✅ Image uploaded to Gemini:",
+        uploadedFile.uri
+      );
+
+      // -----------------------------------------------------
+      // GEMINI INTERACTION
+      // -----------------------------------------------------
+
+      const interaction =
+        await geminiClient.interactions.create({
+          model: "gemini-3.8-flash",
+
+          input: [
+            {
+              type: "text",
+
+              text: `
+You are the AI Study Assistant of CST HUB.
+
+A student has uploaded an educational image.
+
+Analyze the image carefully and answer the student's question.
+
+Student's question:
+
+${question}
+
+The image may contain:
+
+- Mathematics
+- Programming code
+- HTML
+- CSS
+- JavaScript
+- React
+- Node.js
+- Physics
+- Electrical diagrams
+- Technical diagrams
+- Class notes
+- Tables
+- Charts
+- Exam questions
+- Screenshots
+
+IMPORTANT RULES:
+
+1. Carefully read all visible information.
+2. Do not guess information that cannot be clearly seen.
+3. If something is blurry or unreadable, clearly say so.
+4. If it is a mathematics problem, solve it step by step.
+5. If it is programming code, explain what the code does.
+6. If there is an error in the code, identify the error and explain how to fix it.
+7. If it is a diagram, explain each important part.
+8. If it is a physics problem, explain the formula and calculation.
+9. If it is an electrical/technical diagram, explain the components and their purpose.
+10. If it is a note, summarize it and explain the important points.
+11. If it is a table or chart, explain the important information.
+12. Use simple Bangla so a Bangladeshi polytechnic student can understand.
+13. Keep technical terms in English when necessary.
+14. Give the final answer clearly.
+15. Do not make up information that is not present in the image.
+
+Use this format when appropriate:
+
+📌 ছবিতে কী আছে
+
+Explain what you see in the image.
+
+📖 সহজ ব্যাখ্যা
+
+Explain the topic in very simple Bangla.
+
+🔍 বিস্তারিত
+
+Give the detailed explanation or step-by-step solution.
+
+✅ উত্তর / Result
+
+Give the final answer if there is a question.
+
+💡 মনে রাখার বিষয়
+
+Give important points the student should remember.
+`,
+            },
+
+            {
+              type: "image",
+              uri: uploadedFile.uri,
+              mime_type: uploadedFile.mimeType,
+            },
+          ],
+        });
+
+      // -----------------------------------------------------
+      // GET GEMINI ANSWER
+      // -----------------------------------------------------
+
+      const answer = interaction.output_text;
+
+      if (!answer) {
+        return res.status(500).json({
+          success: false,
+          message: "Gemini did not return an answer.",
+        });
+      }
+
+      // -----------------------------------------------------
+      // SEND RESPONSE
+      // -----------------------------------------------------
+
+      return res.status(200).json({
+        success: true,
+        answer,
+      });
+    } catch (error) {
+      console.error(
+        "❌ Gemini Image Assistant Error:",
+        error
+      );
+
+      // =====================================================
+      // GEMINI 429 RATE LIMIT
+      // =====================================================
+
+      if (
+        error?.status === 429 ||
+        error?.code === 429 ||
+        error?.message?.includes("429") ||
+        error?.message
+          ?.toLowerCase()
+          .includes("rate limit")
+      ) {
+        return res.status(429).json({
+          success: false,
+          message:
+            "Gemini Free Tier-এর daily limit শেষ হয়েছে। কিছুক্ষণ পরে আবার চেষ্টা করো।",
+        });
+      }
+
+      // =====================================================
+      // OTHER ERROR
+      // =====================================================
+
+      return res.status(500).json({
+        success: false,
+        message:
+          error?.message ||
+          "Failed to analyze image.",
+      });
+    } finally {
+      // -----------------------------------------------------
+      // DELETE TEMPORARY FILE
+      // -----------------------------------------------------
+
+      if (tempFilePath) {
+        try {
+          await fs.promises.unlink(
+            tempFilePath
+          );
+
+          console.log(
+            "🗑️ Temporary image deleted."
+          );
+        } catch (error) {
+          console.log(
+            "Temporary file cleanup skipped."
+          );
+        }
+      }
+    }
+  }
+);
+
+
+// socekt io for room 
+
+
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
+  }
+});
+
+// ১. ডকস থেকে তোমার নেওয়া আইডি কম্পিউট করার ফাংশন (অথেন্টিকেশন বা ইউজার ইনফো চেক করার জন্য)
+async function computeUserIdFromHeaders(headers) {
+  // এখানে তুমি চাইলে ফ্রন্টএন্ড থেকে পাঠানো token বা userId হ্যান্ডশেক হেডার থেকে নিতে পারো
+  // উদাহরণস্বরূপ: headers["user-id"] বা jwt verify করে userId রিটার্ন করা
+  return headers["user-id"] || "guest-user-" + Math.random().toString(36).substring(7);
+}
+
+io.on("connection", async (socket) => {
+  // ডকসের নিয়মে হ্যান্ডশেক হেডার থেকে ইউজার আইডি বের করে তার পার্সোনাল রুমে জয়েন করিয়ে দিলাম
+  const userId = await computeUserIdFromHeaders(socket.handshake.headers);
+  socket.join(userId);
+  console.log(`User connected & joined personal room: ${userId}`);
+
+  // ২. স্টাডি রুম বা স্পেসিফিক প্রজেক্ট রুমে জয়েন করার লজিক (ডকসের "some room" বা project ரூমের মতো)
+  socket.on("join-study-room", (roomId) => {
+    socket.join(roomId);
+    console.log(`Socket ${socket.id} joined study room: ${roomId}`);
+
+    // রুমে উপস্থিত অন্য মেম্বারকে জানানো যে নতুন কেউ এসেছে (WebRTC এর জন্য)
+    socket.to(roomId).emit("user-connected", { userId, socketId: socket.id });
+  });
+
+  // ৩. WebRTC Signaling (Offer, Answer, ICE Candidates আদান-প্রদান)
+  socket.on("offer", (payload) => {
+    io.to(payload.target).emit("offer", {
+      offer: payload.offer,
+      caller: socket.id
+    });
+  });
+
+  socket.on("answer", (payload) => {
+    io.to(payload.target).emit("answer", {
+      answer: payload.answer,
+      receiver: socket.id
+    });
+  });
+
+  socket.on("ice-candidate", (incoming) => {
+    io.to(incoming.target).emit("ice-candidate", {
+      candidate: incoming.candidate,
+      sender: socket.id
+    });
+  });
+
+  // ৪. ডকসের ডিসকানেক্টিং ও রুম ট্র্যাক করার লজিক
+  socket.on("disconnecting", () => {
+    console.log("Active rooms before disconnect:", socket.rooms); 
+    // Set থেকে চেক করে রুমের অন্যদের জানিয়ে দেওয়া যে ইউজার চলে গেছে
+    for (const room of socket.rooms) {
+      if (room !== socket.id && room !== userId) {
+        socket.to(room).emit("user-disconnected", socket.id);
+      }
+    }
+  });
+
+  socket.on("disconnect", () => {
+    // ডকস অনুযায়ী এখানে socket.rooms.size === 0 হয়ে যায়
+    console.log(`User fully disconnected: ${socket.id}`);
+  });
+});
+
+
+
+// =========================================================
+// MULTER PDF CONFIGURATION
 // =========================================================
 
 const storage = multer.diskStorage({
@@ -80,9 +526,8 @@ const storage = multer.diskStorage({
   },
 });
 
-
 // =========================================================
-// MULTER UPLOAD
+// PDF UPLOAD
 // =========================================================
 
 const upload = multer({
@@ -95,7 +540,9 @@ const upload = multer({
   fileFilter: (req, file, cb) => {
     if (file.mimetype !== "application/pdf") {
       return cb(
-        new Error("Only PDF files are allowed!")
+        new Error(
+          "Only PDF files are allowed!"
+        )
       );
     }
 
@@ -145,7 +592,9 @@ async function run() {
 
     await client.connect();
 
-    console.log("✅ Connected to MongoDB");
+    console.log(
+      "✅ Connected to MongoDB"
+    );
 
     // -------------------------------------------------------
     // DATABASE
@@ -188,6 +637,7 @@ async function run() {
 
     app.post(
       "/students",
+
       async (req, res) => {
         try {
           const {
@@ -198,7 +648,6 @@ async function run() {
             roll,
           } = req.body;
 
-          // Required fields
           if (
             !name ||
             !email ||
@@ -223,12 +672,11 @@ async function run() {
             roll.trim();
 
           // Check email
+
           const existingEmail =
-            await studentsCollection.findOne(
-              {
-                email: cleanEmail,
-              }
-            );
+            await studentsCollection.findOne({
+              email: cleanEmail,
+            });
 
           if (existingEmail) {
             return res.status(409).json({
@@ -239,12 +687,11 @@ async function run() {
           }
 
           // Check roll
+
           const existingRoll =
-            await studentsCollection.findOne(
-              {
-                roll: cleanRoll,
-              }
-            );
+            await studentsCollection.findOne({
+              roll: cleanRoll,
+            });
 
           if (existingRoll) {
             return res.status(409).json({
@@ -271,6 +718,7 @@ async function run() {
 
           res.status(201).json({
             success: true,
+
             message:
               "Student registered successfully!",
 
@@ -298,6 +746,7 @@ async function run() {
 
     app.get(
       "/students",
+
       async (req, res) => {
         try {
           const students =
@@ -336,10 +785,10 @@ async function run() {
 
     app.get(
       "/students/:id",
+
       async (req, res) => {
         try {
-          const { id } =
-            req.params;
+          const { id } = req.params;
 
           if (!isValidObjectId(id)) {
             return res.status(400).json({
@@ -391,10 +840,10 @@ async function run() {
 
     app.patch(
       "/students/:id",
+
       async (req, res) => {
         try {
-          const { id } =
-            req.params;
+          const { id } = req.params;
 
           if (!isValidObjectId(id)) {
             return res.status(400).json({
@@ -476,10 +925,10 @@ async function run() {
 
     app.delete(
       "/students/:id",
+
       async (req, res) => {
         try {
-          const { id } =
-            req.params;
+          const { id } = req.params;
 
           if (!isValidObjectId(id)) {
             return res.status(400).json({
@@ -527,6 +976,7 @@ async function run() {
 
     app.post(
       "/login",
+
       async (req, res) => {
         try {
           const {
@@ -548,26 +998,25 @@ async function run() {
           }
 
           const student =
-            await studentsCollection.findOne(
-              {
-                name: name.trim(),
+            await studentsCollection.findOne({
+              name: name.trim(),
 
-                $or: [
-                  {
-                    email:
-                      emailOrRoll
-                        .toLowerCase()
-                        .trim(),
-                  },
-                  {
-                    roll:
-                      emailOrRoll.trim(),
-                  },
-                ],
+              $or: [
+                {
+                  email:
+                    emailOrRoll
+                      .toLowerCase()
+                      .trim(),
+                },
 
-                password,
-              }
-            );
+                {
+                  roll:
+                    emailOrRoll.trim(),
+                },
+              ],
+
+              password,
+            });
 
           if (!student) {
             return res.status(401).json({
@@ -583,9 +1032,11 @@ async function run() {
             email: student.email,
             group: student.group,
             roll: student.roll,
+
             role:
               student.role ||
               "student",
+
             createdAt:
               student.createdAt,
           };
@@ -623,6 +1074,7 @@ async function run() {
 
     app.post(
       "/notices",
+
       async (req, res) => {
         try {
           const {
@@ -700,6 +1152,7 @@ async function run() {
 
     app.get(
       "/notices",
+
       async (req, res) => {
         try {
           const notices =
@@ -729,10 +1182,10 @@ async function run() {
 
     app.get(
       "/notices/:id",
+
       async (req, res) => {
         try {
-          const { id } =
-            req.params;
+          const { id } = req.params;
 
           if (!isValidObjectId(id)) {
             return res.status(400).json({
@@ -743,11 +1196,9 @@ async function run() {
           }
 
           const notice =
-            await noticesCollection.findOne(
-              {
-                _id: new ObjectId(id),
-              }
-            );
+            await noticesCollection.findOne({
+              _id: new ObjectId(id),
+            });
 
           if (!notice) {
             return res.status(404).json({
@@ -779,10 +1230,10 @@ async function run() {
 
     app.patch(
       "/notices/:id",
+
       async (req, res) => {
         try {
-          const { id } =
-            req.params;
+          const { id } = req.params;
 
           if (!isValidObjectId(id)) {
             return res.status(400).json({
@@ -810,8 +1261,7 @@ async function run() {
           }
 
           if (
-            description !==
-            undefined
+            description !== undefined
           ) {
             updateData.description =
               description.trim();
@@ -879,10 +1329,10 @@ async function run() {
 
     app.delete(
       "/notices/:id",
+
       async (req, res) => {
         try {
-          const { id } =
-            req.params;
+          const { id } = req.params;
 
           if (!isValidObjectId(id)) {
             return res.status(400).json({
@@ -934,7 +1384,9 @@ async function run() {
 
     app.post(
       "/notes",
+
       upload.single("file"),
+
       async (req, res) => {
         try {
           const {
@@ -947,7 +1399,6 @@ async function run() {
             uploadedByEmail,
           } = req.body;
 
-          // Check title
           if (!title) {
             return res.status(400).json({
               success: false,
@@ -956,7 +1407,6 @@ async function run() {
             });
           }
 
-          // Check PDF
           if (!req.file) {
             return res.status(400).json({
               success: false,
@@ -970,7 +1420,9 @@ async function run() {
           // -------------------------------------------------
 
           const fileUrl =
-            `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
+            `${req.protocol}://${req.get(
+              "host"
+            )}/uploads/${req.file.filename}`;
 
           // -------------------------------------------------
           // NOTE DATA
@@ -1003,22 +1455,17 @@ async function run() {
               uploadedByEmail ||
               "",
 
-            // Original file name
             fileName:
               req.file.originalname,
 
-            // Public PDF URL
             fileUrl,
 
-            // application/pdf
             fileType:
               req.file.mimetype,
 
-            // bytes
             fileSize:
               req.file.size,
 
-            // Actual filename in uploads/
             serverFileName:
               req.file.filename,
 
@@ -1053,7 +1500,7 @@ async function run() {
           );
 
           // Delete uploaded file
-          // if database operation fails
+
           if (req.file) {
             const filePath =
               path.join(
@@ -1085,6 +1532,7 @@ async function run() {
 
     app.get(
       "/notes",
+
       async (req, res) => {
         try {
           const notes =
@@ -1117,10 +1565,10 @@ async function run() {
 
     app.get(
       "/notes/:id",
+
       async (req, res) => {
         try {
-          const { id } =
-            req.params;
+          const { id } = req.params;
 
           if (!isValidObjectId(id)) {
             return res.status(400).json({
@@ -1131,11 +1579,9 @@ async function run() {
           }
 
           const note =
-            await notesCollection.findOne(
-              {
-                _id: new ObjectId(id),
-              }
-            );
+            await notesCollection.findOne({
+              _id: new ObjectId(id),
+            });
 
           if (!note) {
             return res.status(404).json({
@@ -1164,18 +1610,15 @@ async function run() {
     // -------------------------------------------------------
     // UPDATE NOTE
     // -------------------------------------------------------
-    //
-    // New PDF is optional.
-    //
-    // -------------------------------------------------------
 
     app.patch(
       "/notes/:id",
+
       upload.single("file"),
+
       async (req, res) => {
         try {
-          const { id } =
-            req.params;
+          const { id } = req.params;
 
           if (!isValidObjectId(id)) {
             return res.status(400).json({
@@ -1186,15 +1629,15 @@ async function run() {
           }
 
           // Find existing note
+
           const existingNote =
-            await notesCollection.findOne(
-              {
-                _id: new ObjectId(id),
-              }
-            );
+            await notesCollection.findOne({
+              _id: new ObjectId(id),
+            });
 
           if (!existingNote) {
             // Remove newly uploaded PDF
+
             if (req.file) {
               const filePath =
                 path.join(
@@ -1292,7 +1735,9 @@ async function run() {
 
           if (req.file) {
             const newFileUrl =
-              `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
+              `${req.protocol}://${req.get(
+                "host"
+              )}/uploads/${req.file.filename}`;
 
             updateData.fileName =
               req.file.originalname;
@@ -1359,7 +1804,7 @@ async function run() {
           );
 
           // Delete new PDF
-          // if update fails
+
           if (req.file) {
             const filePath =
               path.join(
@@ -1391,10 +1836,10 @@ async function run() {
 
     app.delete(
       "/notes/:id",
+
       async (req, res) => {
         try {
-          const { id } =
-            req.params;
+          const { id } = req.params;
 
           if (!isValidObjectId(id)) {
             return res.status(400).json({
@@ -1405,12 +1850,11 @@ async function run() {
           }
 
           // Find note
+
           const note =
-            await notesCollection.findOne(
-              {
-                _id: new ObjectId(id),
-              }
-            );
+            await notesCollection.findOne({
+              _id: new ObjectId(id),
+            });
 
           if (!note) {
             return res.status(404).json({
@@ -1483,7 +1927,10 @@ async function run() {
           err
         );
 
-        // Multer error
+        // ---------------------------------------------------
+        // AI IMAGE FILE SIZE
+        // ---------------------------------------------------
+
         if (
           err instanceof
           multer.MulterError
@@ -1495,12 +1942,15 @@ async function run() {
             return res.status(400).json({
               success: false,
               message:
-                "PDF size cannot exceed 60MB!",
+                "File size is too large!",
             });
           }
         }
 
-        // PDF validation error
+        // ---------------------------------------------------
+        // PDF VALIDATION
+        // ---------------------------------------------------
+
         if (
           err.message ===
           "Only PDF files are allowed!"
@@ -1512,9 +1962,28 @@ async function run() {
           });
         }
 
-        // Other errors
+        // ---------------------------------------------------
+        // IMAGE VALIDATION
+        // ---------------------------------------------------
+
+        if (
+          err.message ===
+          "Only JPG, PNG and WEBP images are allowed!"
+        ) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "Only JPG, PNG and WEBP images are allowed!",
+          });
+        }
+
+        // ---------------------------------------------------
+        // OTHER ERRORS
+        // ---------------------------------------------------
+
         res.status(500).json({
           success: false,
+
           message:
             err.message ||
             "Something went wrong!",
@@ -1548,4 +2017,3 @@ app.listen(port, () => {
     `🚀 CST HUB Server running on port ${port}`
   );
 });
-
