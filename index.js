@@ -2011,9 +2011,21 @@ run();
 // =========================================================
 // START SERVER
 // =========================================================
+// =========================================================
+// START DATABASE
+// =========================================================
+run().catch(console.error);
 
-app.listen(port, () => {
-  console.log(
-    `🚀 CST HUB Server running on port ${port}`
-  );
-});
+// =========================================================
+// START SERVER
+// =========================================================
+
+// Local development
+if (process.env.NODE_ENV !== "production") {
+  server.listen(port, () => {
+    console.log(`🚀 CST HUB Server running on port ${port}`);
+  });
+}
+
+// Vercel-এর জন্য export
+module.exports = app;
