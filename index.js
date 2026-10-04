@@ -22,7 +22,7 @@ const port = process.env.PORT || 8000;
 // =========================================================
 // MIDDLEWARE
 // =========================================================
-app.use(cors());
+app.use(cors({ origin: "*", methods: ["GET", "POST", "PATCH", "DELETE"] }));
 app.use(express.json({ limit: "60mb" }));
 
 // =========================================================
@@ -40,7 +40,7 @@ if (!fs.existsSync(uploadDir)) {
 app.use("/uploads", express.static(uploadDir));
 
 // =========================================================
-// HOME (সবসময় কাজ করবে)
+// HOME
 // =========================================================
 app.get("/", (req, res) => {
   res.json({
@@ -69,36 +69,135 @@ const aiUpload = multer({
   },
 });
 
-// (তোমার /api/ai/explain-image route এখানেই রাখো — আগের মতো)
+app.post("/api/ai/explain-image", aiUpload.single("image"), async (req, res) => {
+  let tempFilePath = null;
+
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "Please upload an image.",
+      });
+    }
+
+    const question =
+      req.body.question?.trim() || "এই ছবিটা সহজভাবে বুঝিয়ে দাও।";
+
+    console.log("📷 Image:", req.file.originalname);
+    console.log("❓ Question:", question);
+
+    // MOCK MODE
+    if (process.env.MOCK_GEMINI === "true") {
+      await new Promise((r) => setTimeout(r, 1000));
+      return res.json({
+        success: true,
+        answer: `🤖 CST HUB AI (Mock Mode)\n\nপ্রশ্ন: ${question}\n\nImage successfully received. MOCK_GEMINI=false করলে আসল Gemini চালু হবে।`,
+      });
+    }
+
+    const extension =
+      req.file.mimetype === "image/png"
+        ? ".png"
+        : req.file.mimetype === "image/webp"
+        ? ".webp"
+        : ".jpg";
+
+    tempFilePath = path.join(os.tmpdir(), `csthub-${Date.now()}${extension}`);
+    await fs.promises.writeFile(tempFilePath, req.file.buffer);
+
+    const uploadedFile = await geminiClient.files.upload({
+      file: tempFilePath,
+      config: { mime_type: req.file.mimetype },
+    });
+
+    const interaction = await geminiClient.interactions.create({
+      model: "gemini-2.0-flash",
+      input: [
+        {
+          type: "text",
+          text: `You are CST HUB AI Study Assistant. Answer in simple Bangla. Student's question: ${question}`,
+        },
+        {
+          type: "image",
+          uri: uploadedFile.uri,
+          mime_type: uploadedFile.mimeType,
+        },
+      ],
+    });
+
+    const answer = interaction.output_text;
+
+    if (!answer) {
+      return res.status(500).json({
+        success: false,
+        message: "Gemini did not return an answer.",
+      });
+    }
+
+    return res.json({ success: true, answer });
+  } catch (error) {
+    console.error("❌ Gemini Error:", error);
+
+    if (
+      error?.status === 429 ||
+      error?.message?.includes("429") ||
+      error?.message?.toLowerCase().includes("rate limit")
+    ) {
+      return res.status(429).json({
+        success: false,
+        message: "Gemini daily limit শেষ। পরে চেষ্টা করো।",
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: error?.message || "Failed to analyze image.",
+    });
+  } finally {
+    if (tempFilePath) {
+      try {
+        await fs.promises.unlink(tempFilePath);
+      } catch (_) {}
+    }
+  }
+});
 
 // =========================================================
 // SOCKET.IO
 // =========================================================
 const server = http.createServer(app);
+
 const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] },
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"],
+  },
 });
 
 async function computeUserIdFromHeaders(headers) {
   return (
     headers["user-id"] ||
-    "guest-user-" + Math.random().toString(36).substring(7)
+    "guest-" + Math.random().toString(36).substring(7)
   );
 }
 
 io.on("connection", async (socket) => {
   const userId = await computeUserIdFromHeaders(socket.handshake.headers);
   socket.join(userId);
-  console.log(`User connected: ${userId}`);
+  console.log(`✅ User connected: ${userId} | ${socket.id}`);
 
+  // Join study room
   socket.on("join-study-room", (roomId) => {
     socket.join(roomId);
+    console.log(`📥 ${socket.id} joined room: ${roomId}`);
+
     socket.to(roomId).emit("user-connected", {
       userId,
       socketId: socket.id,
     });
   });
 
+  // WebRTC signaling
   socket.on("offer", (payload) => {
     io.to(payload.target).emit("offer", {
       offer: payload.offer,
@@ -120,12 +219,25 @@ io.on("connection", async (socket) => {
     });
   });
 
+  // Chat
+  socket.on("chat-message", ({ roomId, text }) => {
+    socket.to(roomId).emit("chat-message", {
+      sender: "Peer",
+      text,
+    });
+  });
+
+  // Disconnect
   socket.on("disconnecting", () => {
     for (const room of socket.rooms) {
       if (room !== socket.id && room !== userId) {
         socket.to(room).emit("user-disconnected", socket.id);
       }
     }
+  });
+
+  socket.on("disconnect", () => {
+    console.log(`❌ Disconnected: ${socket.id}`);
   });
 });
 
@@ -199,10 +311,8 @@ async function connectDB() {
 const isValidObjectId = (id) => ObjectId.isValid(id);
 
 // =========================================================
-// API ROUTES
+// STUDENTS
 // =========================================================
-
-// ---------- STUDENTS ----------
 app.post("/students", async (req, res) => {
   try {
     await connectDB();
@@ -219,9 +329,7 @@ app.post("/students", async (req, res) => {
     const cleanEmail = email.toLowerCase().trim();
     const cleanRoll = roll.trim();
 
-    const existingEmail = await studentsCollection.findOne({
-      email: cleanEmail,
-    });
+    const existingEmail = await studentsCollection.findOne({ email: cleanEmail });
     if (existingEmail) {
       return res.status(409).json({
         success: false,
@@ -229,9 +337,7 @@ app.post("/students", async (req, res) => {
       });
     }
 
-    const existingRoll = await studentsCollection.findOne({
-      roll: cleanRoll,
-    });
+    const existingRoll = await studentsCollection.findOne({ roll: cleanRoll });
     if (existingRoll) {
       return res.status(409).json({
         success: false,
@@ -288,6 +394,7 @@ app.get("/students/:id", async (req, res) => {
   try {
     await connectDB();
     const { id } = req.params;
+
     if (!isValidObjectId(id)) {
       return res.status(400).json({
         success: false,
@@ -321,6 +428,7 @@ app.patch("/students/:id", async (req, res) => {
   try {
     await connectDB();
     const { id } = req.params;
+
     if (!isValidObjectId(id)) {
       return res.status(400).json({
         success: false,
@@ -361,6 +469,7 @@ app.delete("/students/:id", async (req, res) => {
   try {
     await connectDB();
     const { id } = req.params;
+
     if (!isValidObjectId(id)) {
       return res.status(400).json({
         success: false,
@@ -389,7 +498,9 @@ app.delete("/students/:id", async (req, res) => {
   }
 });
 
-// ---------- LOGIN ----------
+// =========================================================
+// LOGIN
+// =========================================================
 app.post("/login", async (req, res) => {
   try {
     await connectDB();
@@ -418,20 +529,18 @@ app.post("/login", async (req, res) => {
       });
     }
 
-    const studentData = {
-      _id: student._id,
-      name: student.name,
-      email: student.email,
-      group: student.group,
-      roll: student.roll,
-      role: student.role || "student",
-      createdAt: student.createdAt,
-    };
-
     res.json({
       success: true,
       message: `Welcome back, ${student.name}!`,
-      user: studentData,
+      user: {
+        _id: student._id,
+        name: student.name,
+        email: student.email,
+        group: student.group,
+        roll: student.roll,
+        role: student.role || "student",
+        createdAt: student.createdAt,
+      },
     });
   } catch (error) {
     console.error("Login error:", error);
@@ -442,7 +551,9 @@ app.post("/login", async (req, res) => {
   }
 });
 
-// ---------- NOTICES ----------
+// =========================================================
+// NOTICES
+// =========================================================
 app.post("/notices", async (req, res) => {
   try {
     await connectDB();
@@ -502,6 +613,7 @@ app.get("/notices/:id", async (req, res) => {
   try {
     await connectDB();
     const { id } = req.params;
+
     if (!isValidObjectId(id)) {
       return res.status(400).json({
         success: false,
@@ -534,6 +646,7 @@ app.patch("/notices/:id", async (req, res) => {
   try {
     await connectDB();
     const { id } = req.params;
+
     if (!isValidObjectId(id)) {
       return res.status(400).json({
         success: false,
@@ -575,6 +688,7 @@ app.delete("/notices/:id", async (req, res) => {
   try {
     await connectDB();
     const { id } = req.params;
+
     if (!isValidObjectId(id)) {
       return res.status(400).json({
         success: false,
@@ -603,7 +717,9 @@ app.delete("/notices/:id", async (req, res) => {
   }
 });
 
-// ---------- NOTES ----------
+// =========================================================
+// NOTES
+// =========================================================
 app.post("/notes", upload.single("file"), async (req, res) => {
   try {
     await connectDB();
@@ -631,9 +747,7 @@ app.post("/notes", upload.single("file"), async (req, res) => {
       });
     }
 
-    const fileUrl = `${req.protocol}://${req.get("host")}/uploads/${
-      req.file.filename
-    }`;
+    const fileUrl = `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
 
     const note = {
       title: title.trim(),
@@ -693,6 +807,7 @@ app.get("/notes/:id", async (req, res) => {
   try {
     await connectDB();
     const { id } = req.params;
+
     if (!isValidObjectId(id)) {
       return res.status(400).json({
         success: false,
@@ -725,6 +840,7 @@ app.delete("/notes/:id", async (req, res) => {
   try {
     await connectDB();
     const { id } = req.params;
+
     if (!isValidObjectId(id)) {
       return res.status(400).json({
         success: false,
@@ -794,14 +910,12 @@ app.use((err, req, res, next) => {
 });
 
 // =========================================================
-// START
+// START SERVER
 // =========================================================
 connectDB().catch(console.error);
 
-if (process.env.NODE_ENV !== "production") {
-  server.listen(port, () => {
-    console.log(`🚀 CST HUB Server running on port ${port}`);
-  });
-}
+server.listen(port, () => {
+  console.log(`🚀 CST HUB Server running on port ${port}`);
+});
 
 module.exports = app;
