@@ -227,7 +227,7 @@ MOCK_GEMINI=false
 
       tempFilePath = path.join(
         os.tmpdir(),
-        `cst-hub-${Date.now()}${extension}`
+        `Cst-hub-${Date.now()}${extension}`
       );
 
       await fs.promises.writeFile(
