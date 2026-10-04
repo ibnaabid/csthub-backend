@@ -283,445 +283,475 @@ ${question}`,
    STUDY ROOM
 ========================================================= */
 
+/* =========================================================
+   SOCKET.IO
+   STUDY ROOM
+========================================================= */
+/* =========================================================
+   SOCKET.IO
+   STUDY ROOM
+========================================================= */
+
 const io = new Server(server, {
   cors: {
     origin: "*",
     methods: ["GET", "POST"],
   },
-
-  transports: [
-    "websocket",
-    "polling",
-  ],
+  transports: ["websocket", "polling"],
 });
 
 /*
-  Study room structure:
+  roomId => Map(socketId, participant)
 
-  roomId -> Set(socketId)
-
-  Example:
-
-  cst-oq3on9
-      |
-      |-- socketA
-      |-- socketB
-
-  Maximum 2 students per room.
+  Maximum 5 students per room.
 */
 
 const studyRooms = new Map();
+
+const MAX_ROOM_USERS = 5;
 
 /* =========================================================
    SOCKET CONNECTION
 ========================================================= */
 
 io.on("connection", (socket) => {
-  console.log(
-    `🔌 Socket connected: ${socket.id}`
-  );
+  console.log(`🔌 Socket connected: ${socket.id}`);
+
+  /*
+    User information comes from frontend auth
+  */
+
+  const userId =
+    String(socket.handshake.auth?.userId || `guest-${socket.id}`);
+
+  const userName =
+    String(socket.handshake.auth?.userName || "Student").trim() ||
+    "Student";
+
+  socket.data.userId = userId;
+  socket.data.userName = userName;
+  socket.data.roomId = null;
+
+  console.log(`👤 ${userName} connected (${socket.id})`);
 
   /* =======================================================
      JOIN STUDY ROOM
   ======================================================= */
 
-  socket.on(
-    "join-study-room",
-    (roomId) => {
-      try {
-        if (!roomId) {
-          return;
-        }
+  socket.on("join-study-room", (roomId) => {
+    try {
+      const cleanRoomId = String(roomId || "").trim();
 
-        const cleanRoomId =
-          String(roomId).trim();
-
-        if (!cleanRoomId) {
-          return;
-        }
-
-        /* =========================
-           CREATE ROOM IF NEEDED
-        ========================= */
-
-        if (
-          !studyRooms.has(
-            cleanRoomId
-          )
-        ) {
-          studyRooms.set(
-            cleanRoomId,
-            new Set()
-          );
-        }
-
-        const room =
-          studyRooms.get(
-            cleanRoomId
-          );
-
-        /* =========================
-           ALREADY IN ROOM
-        ========================= */
-
-        if (
-          room.has(socket.id)
-        ) {
-          return;
-        }
-
-        /* =========================
-           MAX 2 STUDENTS
-        ========================= */
-
-        if (room.size >= 2) {
-          console.log(
-            `🚫 Room full: ${cleanRoomId}`
-          );
-
-          socket.emit(
-            "room-full"
-          );
-
-          return;
-        }
-
-        /*
-          Existing students
-          BEFORE current student joins
-        */
-
-        const existingUsers =
-          Array.from(room);
-
-        /* =========================
-           JOIN SOCKET.IO ROOM
-        ========================= */
-
-        room.add(socket.id);
-
-        socket.join(
-          cleanRoomId
-        );
-
-        socket.data.roomId =
-          cleanRoomId;
-
-        console.log(
-          `📥 ${socket.id} joined room: ${cleanRoomId}`
-        );
-
-        /* =========================
-           SEND EXISTING USERS
-           TO NEW USER
-        ========================= */
-
-        socket.emit(
-          "room-users",
-          {
-            users: existingUsers,
-          }
-        );
-
-        /* =========================
-           TELL EXISTING USER
-           NEW USER ARRIVED
-        ========================= */
-
-        socket
-          .to(cleanRoomId)
-          .emit(
-            "user-connected",
-            {
-              socketId:
-                socket.id,
-            }
-          );
-
-        /* =========================
-           ROOM COUNT
-        ========================= */
-
-        io.to(cleanRoomId).emit(
-          "room-user-count",
-          {
-            count: room.size,
-          }
-        );
-
-        console.log(
-          `👥 Room ${cleanRoomId}: ${room.size}/2`
-        );
-      } catch (error) {
-        console.error(
-          "Join room error:",
-          error
-        );
+      if (!cleanRoomId) {
+        socket.emit("room-error", {
+          message: "Invalid room ID",
+        });
+        return;
       }
+
+      /*
+        If socket is already inside another room,
+        remove it first.
+      */
+
+      if (
+        socket.data.roomId &&
+        socket.data.roomId !== cleanRoomId
+      ) {
+        removeUserFromStudyRoom(socket);
+      }
+
+      /*
+        Create room
+      */
+
+      if (!studyRooms.has(cleanRoomId)) {
+        studyRooms.set(cleanRoomId, new Map());
+      }
+
+      const room = studyRooms.get(cleanRoomId);
+
+      /*
+        Already joined
+      */
+
+      if (room.has(socket.id)) {
+        return;
+      }
+
+      /*
+        Maximum 5 users
+      */
+
+      if (room.size >= MAX_ROOM_USERS) {
+        console.log(`🚫 Room full: ${cleanRoomId}`);
+
+        socket.emit("room-full", {
+          maxUsers: MAX_ROOM_USERS,
+        });
+
+        return;
+      }
+
+      /*
+        Current participant
+      */
+
+      const participant = {
+        socketId: socket.id,
+        userId: socket.data.userId,
+        userName: socket.data.userName,
+      };
+
+      /*
+        Get existing users BEFORE adding new user
+      */
+
+      const existingUsers = Array.from(room.values());
+
+      /*
+        Add new user
+      */
+
+      room.set(socket.id, participant);
+
+      socket.join(cleanRoomId);
+
+      socket.data.roomId = cleanRoomId;
+
+      console.log(
+        `📥 ${socket.data.userName} joined room ${cleanRoomId}`
+      );
+
+      console.log(
+        `👥 Room users: ${room.size}/${MAX_ROOM_USERS}`
+      );
+
+      /*
+        Send existing users to NEW user
+      */
+
+      socket.emit("room-users", {
+        users: existingUsers,
+        count: room.size,
+      });
+
+      /*
+        Tell EXISTING users about NEW user
+      */
+
+      socket.to(cleanRoomId).emit("user-connected", participant);
+
+      /*
+        Update room count for everyone
+      */
+
+      io.to(cleanRoomId).emit("room-user-count", {
+        count: room.size,
+      });
+
+    } catch (error) {
+      console.error("❌ Join room error:", error);
+
+      socket.emit("room-error", {
+        message: "Could not join study room.",
+      });
     }
-  );
+  });
 
   /* =======================================================
      OFFER
   ======================================================= */
 
-  socket.on(
-    "offer",
-    (payload) => {
-      try {
-        if (
-          !payload ||
-          !payload.target ||
-          !payload.offer
-        ) {
-          return;
-        }
+  socket.on("offer", (payload) => {
+    try {
+      if (!payload) return;
 
-        io.to(
-          payload.target
-        ).emit(
-          "offer",
-          {
-            offer:
-              payload.offer,
+      const { target, offer } = payload;
 
-            caller:
-              socket.id,
-          }
-        );
-      } catch (error) {
-        console.error(
-          "Offer error:",
-          error
-        );
+      if (!target || !offer) return;
+
+      const targetSocket = io.sockets.sockets.get(target);
+
+      if (!targetSocket) {
+        console.log(`⚠️ Target socket not found: ${target}`);
+        return;
       }
+
+      targetSocket.emit("offer", {
+        offer,
+        caller: socket.id,
+
+        callerUserId:
+          socket.data.userId || "",
+
+        callerUserName:
+          socket.data.userName || "Student",
+      });
+
+      console.log(
+        `📡 OFFER ${socket.id} -> ${target}`
+      );
+
+    } catch (error) {
+      console.error("❌ Offer error:", error);
     }
-  );
+  });
 
   /* =======================================================
      ANSWER
   ======================================================= */
 
-  socket.on(
-    "answer",
-    (payload) => {
-      try {
-        if (
-          !payload ||
-          !payload.target ||
-          !payload.answer
-        ) {
-          return;
-        }
+  socket.on("answer", (payload) => {
+    try {
+      if (!payload) return;
 
-        io.to(
-          payload.target
-        ).emit(
-          "answer",
-          {
-            answer:
-              payload.answer,
+      const { target, answer } = payload;
 
-            caller:
-              socket.id,
-          }
-        );
-      } catch (error) {
-        console.error(
-          "Answer error:",
-          error
-        );
+      if (!target || !answer) return;
+
+      const targetSocket = io.sockets.sockets.get(target);
+
+      if (!targetSocket) {
+        console.log(`⚠️ Answer target not found: ${target}`);
+        return;
       }
+
+      /*
+        IMPORTANT:
+        Send responder ID so frontend knows
+        exactly which PeerConnection gets this answer.
+      */
+
+      targetSocket.emit("answer", {
+        answer,
+
+        responder: socket.id,
+
+        /*
+          Also send answerer for frontend compatibility.
+        */
+
+        answerer: socket.id,
+
+        responderUserId:
+          socket.data.userId || "",
+
+        responderUserName:
+          socket.data.userName || "Student",
+
+        answererUserId:
+          socket.data.userId || "",
+
+        answererUserName:
+          socket.data.userName || "Student",
+      });
+
+      console.log(
+        `📡 ANSWER ${socket.id} -> ${target}`
+      );
+
+    } catch (error) {
+      console.error("❌ Answer error:", error);
     }
-  );
+  });
 
   /* =======================================================
      ICE CANDIDATE
   ======================================================= */
 
-  socket.on(
-    "ice-candidate",
-    (payload) => {
-      try {
-        if (
-          !payload ||
-          !payload.target ||
-          !payload.candidate
-        ) {
-          return;
-        }
+  socket.on("ice-candidate", (payload) => {
+    try {
+      if (!payload) return;
 
-        io.to(
-          payload.target
-        ).emit(
-          "ice-candidate",
-          {
-            candidate:
-              payload.candidate,
+      const { target, candidate } = payload;
 
-            sender:
-              socket.id,
-          }
-        );
-      } catch (error) {
-        console.error(
-          "ICE error:",
-          error
-        );
+      if (!target || !candidate) return;
+
+      const targetSocket = io.sockets.sockets.get(target);
+
+      if (!targetSocket) {
+        return;
       }
+
+      targetSocket.emit("ice-candidate", {
+        candidate,
+        sender: socket.id,
+      });
+
+    } catch (error) {
+      console.error("❌ ICE error:", error);
     }
-  );
+  });
 
   /* =======================================================
      CHAT MESSAGE
   ======================================================= */
 
-  socket.on(
-    "chat-message",
-    ({
-      roomId,
-      text,
-      sender,
-    }) => {
-      try {
-        if (
-          !roomId ||
-          !text
-        ) {
-          return;
-        }
+  socket.on("chat-message", (payload) => {
+    try {
+      if (!payload) return;
 
-        const cleanRoomId =
-          String(roomId).trim();
+      const {
+        roomId,
+        text,
+      } = payload;
 
-        const cleanText =
-          String(text).trim();
+      const cleanRoomId =
+        String(roomId || "").trim();
 
-        if (!cleanText) {
-          return;
-        }
+      const cleanText =
+        String(text || "").trim();
 
-        socket
-          .to(cleanRoomId)
-          .emit(
-            "chat-message",
-            {
-              sender:
-                sender ||
-                "Student",
-
-              text:
-                cleanText,
-            }
-          );
-      } catch (error) {
-        console.error(
-          "Chat error:",
-          error
-        );
+      if (!cleanRoomId || !cleanText) {
+        return;
       }
+
+      /*
+        Make sure sender is actually
+        inside this room.
+      */
+
+      const room = studyRooms.get(cleanRoomId);
+
+      if (!room || !room.has(socket.id)) {
+        console.log(
+          `⚠️ Unauthorized chat attempt from ${socket.id}`
+        );
+
+        return;
+      }
+
+      /*
+        Send to everyone EXCEPT sender
+      */
+
+      socket.to(cleanRoomId).emit(
+        "chat-message",
+        {
+          sender:
+            socket.data.userName || "Student",
+
+          senderId: socket.id,
+
+          text: cleanText,
+
+          createdAt: new Date().toISOString(),
+        }
+      );
+
+      console.log(
+        `💬 ${socket.data.userName}: ${cleanText}`
+      );
+
+    } catch (error) {
+      console.error("❌ Chat error:", error);
     }
-  );
+  });
 
   /* =======================================================
      MANUAL LEAVE
   ======================================================= */
 
-  socket.on(
-    "leave-study-room",
-    () => {
-      removeUserFromStudyRoom(
-        socket
-      );
-    }
-  );
+  socket.on("leave-study-room", () => {
+    console.log(
+      `👋 ${socket.data.userName} manually leaving`
+    );
+
+    removeUserFromStudyRoom(socket);
+  });
 
   /* =======================================================
      DISCONNECTING
   ======================================================= */
 
-  socket.on(
-    "disconnecting",
-    () => {
-      removeUserFromStudyRoom(
-        socket
-      );
-    }
-  );
+  socket.on("disconnecting", () => {
+    removeUserFromStudyRoom(socket);
+  });
 
   /* =======================================================
      DISCONNECT
   ======================================================= */
 
-  socket.on(
-    "disconnect",
-    (reason) => {
-      console.log(
-        `❌ Socket disconnected: ${socket.id}`
-      );
+  socket.on("disconnect", (reason) => {
+    console.log(
+      `❌ ${socket.data.userName || "Student"} disconnected`
+    );
 
-      console.log(
-        `Reason: ${reason}`
-      );
-    }
-  );
+    console.log(`Socket: ${socket.id}`);
+    console.log(`Reason: ${reason}`);
+  });
 });
 
 /* =========================================================
    REMOVE USER FROM STUDY ROOM
 ========================================================= */
 
-function removeUserFromStudyRoom(
-  socket
-) {
-  const roomId =
-    socket.data.roomId;
+function removeUserFromStudyRoom(socket) {
+  const roomId = socket.data.roomId;
+
+  /*
+    User is not inside a room
+  */
 
   if (!roomId) {
     return;
   }
 
-  const room =
-    studyRooms.get(
-      roomId
-    );
+  const room = studyRooms.get(roomId);
 
   if (!room) {
-    socket.data.roomId =
-      null;
-
+    socket.data.roomId = null;
     return;
   }
 
-  /* =========================
-     REMOVE USER
-  ========================= */
+  /*
+    Check whether user exists
+  */
 
-  room.delete(
-    socket.id
-  );
+  const existed = room.has(socket.id);
+
+  if (!existed) {
+    socket.data.roomId = null;
+    return;
+  }
+
+  const participant = room.get(socket.id);
+
+  /*
+    Remove user
+  */
+
+  room.delete(socket.id);
 
   console.log(
-    `👋 ${socket.id} left room: ${roomId}`
+    `👋 ${participant?.userName || socket.data.userName || "Student"} left room: ${roomId}`
   );
 
-  /* =========================
-     NOTIFY OTHER STUDENT
-  ========================= */
+  /*
+    Tell other users
+  */
 
-  socket
-    .to(roomId)
-    .emit(
-      "user-disconnected",
-      {
-        socketId:
-          socket.id,
-      }
-    );
+  socket.to(roomId).emit(
+    "user-disconnected",
+    {
+      socketId: socket.id,
 
-  /* =========================
-     ROOM COUNT
-  ========================= */
+      userId:
+        participant?.userId ||
+        socket.data.userId ||
+        "",
+
+      userName:
+        participant?.userName ||
+        socket.data.userName ||
+        "Student",
+    }
+  );
+
+  /*
+    Update room count
+  */
 
   io.to(roomId).emit(
     "room-user-count",
@@ -730,24 +760,32 @@ function removeUserFromStudyRoom(
     }
   );
 
-  /* =========================
-     DELETE EMPTY ROOM
-  ========================= */
+  /*
+    Remove socket from Socket.IO room
+  */
+
+  socket.leave(roomId);
+
+  /*
+    Delete empty room
+  */
 
   if (room.size === 0) {
-    studyRooms.delete(
-      roomId
-    );
+    studyRooms.delete(roomId);
 
     console.log(
       `🗑️ Empty room deleted: ${roomId}`
     );
   }
 
-  socket.data.roomId =
-    null;
+  /*
+    Clear current room
+  */
+
+  socket.data.roomId = null;
 }
 
+  
 /* =========================================================
    MULTER PDF
 ========================================================= */
