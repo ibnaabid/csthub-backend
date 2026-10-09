@@ -196,9 +196,9 @@ MOCK_GEMINI=false করলে আসল Gemini চালু হবে।`,
          GEMINI INTERACTION
       ========================= */
 
-      const interaction =
-        await geminiClient.interactions.create({
-          model: "gemini-2.0-flash",
+   const interaction =
+  await geminiClient.interactions.create({
+    model: "gemini-3.8-flash",
 
           input: [
             {
