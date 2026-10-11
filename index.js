@@ -77,7 +77,6 @@ async function sendOneSignalNotification({ title, message, data = {} }) {
     const result = await response.json();
     console.log("🔔 OneSignal Notification Sent:", result);
   } catch (error) {
-    // নোটিফিকেশন পাঠাতে ফেইল করলে পোস্ট সেভ যেন ব্রেক না করে
     console.error("❌ OneSignal Notification Error (Ignored):", error.message);
   }
 }
@@ -106,20 +105,6 @@ const verifyToken = (req, res, next) => {
       message: "Invalid or expired token!",
     });
   }
-};
-
-const verifyCRorAdmin = (req, res, next) => {
-  verifyToken(req, res, () => {
-    if (req.user && (req.user.role === "cr" || req.user.role === "admin" || req.user.role === "student")) {
-      // CST Hub-এ অনেক সময় স্টুডেন্টরাও নোট বা নোটিশ দিতে পারে, তবে কড়াকড়ি চাইলে role চেক করা যাবে।
-      next();
-    } else {
-      return res.status(403).json({
-        success: false,
-        message: "Permission denied! Authorized personnel only.",
-      });
-    }
-  });
 };
 
 /* =========================================================
@@ -301,7 +286,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // WebRTC Offer - Check if both are in the same room
   socket.on("offer", (payload) => {
     try {
       if (!payload || !payload.target || !payload.offer) return;
@@ -309,7 +293,7 @@ io.on("connection", (socket) => {
       
       const targetSocket = io.sockets.sockets.get(target);
       if (!targetSocket || targetSocket.data.roomId !== socket.data.roomId || !socket.data.roomId) {
-        return; // Security check: Must be in the same room
+        return;
       }
 
       targetSocket.emit("offer", {
@@ -323,7 +307,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // WebRTC Answer
   socket.on("answer", (payload) => {
     try {
       if (!payload || !payload.target || !payload.answer) return;
@@ -346,7 +329,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // ICE Candidate
   socket.on("ice-candidate", (payload) => {
     try {
       if (!payload || !payload.target || !payload.candidate) return;
@@ -366,7 +348,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Chat Message - Room Restricted
   socket.on("chat-message", (payload) => {
     try {
       if (!payload) return;
@@ -514,7 +495,6 @@ app.post("/students", async (req, res) => {
       return res.status(409).json({ success: false, message: "Roll number already registered!" });
     }
 
-    // Hash Password securely
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const student = {
@@ -627,13 +607,11 @@ app.post("/login", async (req, res) => {
       return res.status(401).json({ success: false, message: "Invalid credentials!" });
     }
 
-    // Verify Password against hashed password
     const isPasswordValid = await bcrypt.compare(password, student.password);
     if (!isPasswordValid) {
       return res.status(401).json({ success: false, message: "Invalid credentials!" });
     }
 
-    // Generate JWT Token
     const tokenPayload = {
       userId: student._id,
       name: student.name,
@@ -664,7 +642,7 @@ app.post("/login", async (req, res) => {
 });
 
 /* =========================================================
-   NOTICES (WITH ONESIGNAL NOTIFICATION & AUTH)
+   NOTICES
 ========================================================= */
 
 app.post("/notices", verifyToken, async (req, res) => {
@@ -687,7 +665,6 @@ app.post("/notices", verifyToken, async (req, res) => {
 
     const result = await noticesCollection.insertOne(notice);
 
-    // Send OneSignal Notification (Async - Doesn't block response if it fails)
     sendOneSignalNotification({
       title: `📌 নতুন নোটিশ: ${notice.title}`,
       message: notice.description.substring(0, 100) + "...",
@@ -810,9 +787,8 @@ app.post(
 
       const result = await notesCollection.insertOne(note);
 
-      // Send OneSignal Notification for new Note
       sendOneSignalNotification({
-        title: `📚 নতুন নোট আপলোড হয়েছে: ${note.title}`,
+        title: `📚 নতুন নোট আপলোড হয়েছে: ${note.title}`,
         message: `विषय (Subject): ${note.subject} | সেমিস্টার: ${note.semester}`,
         data: { type: "note", id: result.insertedId.toString() },
       });
@@ -866,7 +842,7 @@ app.delete("/notes/:id", verifyToken, async (req, res) => {
 });
 
 /* =========================================================
-   SERVER LISTENING
+   SERVER LISTENING (CORRECTED PORT)
 ========================================================= */
 
 server.listen(port, () => {
