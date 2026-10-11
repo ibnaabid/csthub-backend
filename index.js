@@ -82,32 +82,6 @@ async function sendOneSignalNotification({ title, message, data = {} }) {
 }
 
 /* =========================================================
-   AUTHENTICATION MIDDLEWARE
-========================================================= */
-
-const verifyToken = (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.status(401).json({
-      success: false,
-      message: "Access denied. No token provided!",
-    });
-  }
-
-  const token = authHeader.split(" ")[1];
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded;
-    next();
-  } catch (error) {
-    return res.status(403).json({
-      success: false,
-      message: "Invalid or expired token!",
-    });
-  }
-};
-
-/* =========================================================
    UPLOAD FOLDER
 ========================================================= */
 
@@ -224,7 +198,7 @@ app.post(
 );
 
 /* =========================================================
-   SOCKET.IO STUDY ROOM (SECURED)
+   SOCKET.IO STUDY ROOM
 ========================================================= */
 
 const io = new Server(server, {
@@ -469,7 +443,7 @@ async function connectDB() {
 const isValidObjectId = (id) => ObjectId.isValid(id);
 
 /* =========================================================
-   STUDENTS (REGISTER & AUTH)
+   STUDENTS (REGISTER)
 ========================================================= */
 
 app.post("/students", async (req, res) => {
@@ -520,7 +494,7 @@ app.post("/students", async (req, res) => {
   }
 });
 
-app.get("/students", verifyToken, async (req, res) => {
+app.get("/students", async (req, res) => {
   try {
     await connectDB();
     const students = await studentsCollection.find({}).sort({ createdAt: -1 }).project({ password: 0 }).toArray();
@@ -530,7 +504,7 @@ app.get("/students", verifyToken, async (req, res) => {
   }
 });
 
-app.get("/students/:id", verifyToken, async (req, res) => {
+app.get("/students/:id", async (req, res) => {
   try {
     await connectDB();
     const { id } = req.params;
@@ -545,7 +519,7 @@ app.get("/students/:id", verifyToken, async (req, res) => {
   }
 });
 
-app.patch("/students/:id", verifyToken, async (req, res) => {
+app.patch("/students/:id", async (req, res) => {
   try {
     await connectDB();
     const { id } = req.params;
@@ -567,7 +541,7 @@ app.patch("/students/:id", verifyToken, async (req, res) => {
   }
 });
 
-app.delete("/students/:id", verifyToken, async (req, res) => {
+app.delete("/students/:id", async (req, res) => {
   try {
     await connectDB();
     const { id } = req.params;
@@ -583,7 +557,7 @@ app.delete("/students/:id", verifyToken, async (req, res) => {
 });
 
 /* =========================================================
-   LOGIN & JWT GENERATION
+   LOGIN
 ========================================================= */
 
 app.post("/login", async (req, res) => {
@@ -645,7 +619,7 @@ app.post("/login", async (req, res) => {
    NOTICES
 ========================================================= */
 
-app.post("/notices", verifyToken, async (req, res) => {
+app.post("/notices", async (req, res) => {
   try {
     await connectDB();
     const { title, description, category, publisher, group } = req.body;
@@ -658,7 +632,7 @@ app.post("/notices", verifyToken, async (req, res) => {
       title: title.trim(),
       description: description.trim(),
       category: category || "general",
-      publisher: publisher?.trim() || req.user.name || "CR Office",
+      publisher: publisher?.trim() || "CR Office",
       group: group || "All",
       createdAt: new Date(),
     };
@@ -708,7 +682,7 @@ app.get("/notices/:id", async (req, res) => {
   }
 });
 
-app.patch("/notices/:id", verifyToken, async (req, res) => {
+app.patch("/notices/:id", async (req, res) => {
   try {
     await connectDB();
     const { id } = req.params;
@@ -732,7 +706,7 @@ app.patch("/notices/:id", verifyToken, async (req, res) => {
   }
 });
 
-app.delete("/notices/:id", verifyToken, async (req, res) => {
+app.delete("/notices/:id", async (req, res) => {
   try {
     await connectDB();
     const { id } = req.params;
@@ -748,18 +722,17 @@ app.delete("/notices/:id", verifyToken, async (req, res) => {
 });
 
 /* =========================================================
-   NOTES (PDF UPLOAD, ONESIGNAL & AUTH)
+   NOTES (PDF UPLOAD)
 ========================================================= */
 
 app.post(
   "/notes",
-  verifyToken,
   upload.single("file"),
   async (req, res) => {
     try {
       await connectDB();
 
-      const { title, subject, description, group, semester } = req.body;
+      const { title, subject, description, group, semester, uploadedBy } = req.body;
 
       if (!title) {
         if (req.file) await fs.promises.unlink(req.file.path).catch(() => {});
@@ -780,8 +753,8 @@ app.post(
         originalName: req.file.originalname,
         filePath: `/uploads/${req.file.filename}`,
         fileSize: req.file.size,
-        uploadedBy: req.user.name || "Anonymous",
-        uploadedByEmail: req.user.email || "",
+        uploadedBy: uploadedBy?.trim() || "Anonymous",
+        uploadedByEmail: "",
         createdAt: new Date(),
       };
 
@@ -817,7 +790,7 @@ app.get("/notes", async (req, res) => {
   }
 });
 
-app.delete("/notes/:id", verifyToken, async (req, res) => {
+app.delete("/notes/:id", async (req, res) => {
   try {
     await connectDB();
     const { id } = req.params;
@@ -842,7 +815,7 @@ app.delete("/notes/:id", verifyToken, async (req, res) => {
 });
 
 /* =========================================================
-   SERVER LISTENING (CORRECTED PORT)
+   SERVER LISTENING
 ========================================================= */
 
 server.listen(port, () => {
