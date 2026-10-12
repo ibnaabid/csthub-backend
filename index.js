@@ -9,7 +9,6 @@ const fs = require("fs");
 const os = require("os");
 const http = require("http");
 const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
 
 const { Server } = require("socket.io");
 const { GoogleGenAI } = require("@google/genai");
@@ -24,7 +23,6 @@ const app = express();
 const server = http.createServer(app);
 
 const port = process.env.PORT || 8000;
-const JWT_SECRET = process.env.JWT_SECRET || "csthub_secure_jwt_secret_key_2026";
 
 /* =========================================================
    MIDDLEWARE
@@ -201,10 +199,6 @@ app.post(
    SOCKET.IO STUDY ROOM
 ========================================================= */
 
-/* =========================================================
-   SOCKET.IO STUDY ROOM (UPDATED & FIXED)
-========================================================= */
-
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
   transports: ["websocket", "polling"],
@@ -215,11 +209,9 @@ const roomUsersMap = new Map();
 io.on("connection", (socket) => {
   console.log("⚡ New user connected:", socket.id);
 
-  // স্টাডি রুমে জয়েন করার ইভেন্ট
   socket.on("join-study-room", (roomId) => {
     socket.join(roomId);
 
-    // ইউজার নেম বের করা
     const userName =
       socket.handshake.auth?.userName || `Student_${socket.id.slice(0, 4)}`;
 
@@ -232,20 +224,13 @@ io.on("connection", (socket) => {
 
     const usersArray = Array.from(roomUsers.values());
 
-    console.log(`👤 ${userName} (${socket.id}) joined room: ${roomId}`);
-    console.log(`📊 Total users in room ${roomId}: ${usersArray.length}`);
-
-    // ১. রুমে থাকা সবাইকে আপডেট ইউজার লিস্ট পাঠানো (যাতে কাউন্ট ২ জন দেখায়)
     io.to(roomId).emit("room-users", { users: usersArray });
-
-    // ২. নতুন ইউজার ঢুকেছে বার্তা আগের মেম্বারদের পাঠানো
     socket.to(roomId).emit("user-connected", {
       socketId: socket.id,
       userName,
     });
   });
 
-  // WebRTC Offer
   socket.on("offer", ({ target, offer, senderName }) => {
     io.to(target).emit("offer", {
       offer,
@@ -254,7 +239,6 @@ io.on("connection", (socket) => {
     });
   });
 
-  // WebRTC Answer
   socket.on("answer", ({ target, answer }) => {
     io.to(target).emit("answer", {
       answer,
@@ -262,7 +246,6 @@ io.on("connection", (socket) => {
     });
   });
 
-  // ICE Candidate exchange
   socket.on("ice-candidate", ({ target, candidate }) => {
     io.to(target).emit("ice-candidate", {
       candidate,
@@ -270,7 +253,6 @@ io.on("connection", (socket) => {
     });
   });
 
-  // Real-time Chat Messaging
   socket.on("chat-message", ({ roomId, text }) => {
     const userName =
       socket.handshake.auth?.userName || `Student_${socket.id.slice(0, 4)}`;
@@ -281,10 +263,7 @@ io.on("connection", (socket) => {
     });
   });
 
-  // ডিসকানেক্ট হ্যান্ডলার
   socket.on("disconnecting", () => {
-    console.log("❌ User disconnecting:", socket.id);
-
     socket.rooms.forEach((roomId) => {
       if (roomUsersMap.has(roomId)) {
         const roomUsers = roomUsersMap.get(roomId);
@@ -295,7 +274,6 @@ io.on("connection", (socket) => {
         if (roomUsers.size === 0) {
           roomUsersMap.delete(roomId);
         } else {
-          // রুমের বাকিদের আপডেট ইনফো পাঠানো
           io.to(roomId).emit("user-disconnected", {
             socketId: socket.id,
             userName: user?.userName || "User",
@@ -309,6 +287,7 @@ io.on("connection", (socket) => {
     });
   });
 });
+
 /* =========================================================
    MULTER PDF
 ========================================================= */
@@ -376,7 +355,7 @@ const isValidObjectId = (id) => ObjectId.isValid(id);
 app.post("/students", async (req, res) => {
   try {
     await connectDB();
-    const { name, email, password, group, roll } = req.body;
+    const { name, email, password, group, roll, role } = req.body;
 
     if (!name || !email || !password || !group || !roll) {
       return res.status(400).json({ success: false, message: "All fields are required!" });
@@ -404,7 +383,7 @@ app.post("/students", async (req, res) => {
       password: hashedPassword,
       group,
       roll: cleanRoll,
-      role: "student",
+      role: role ? role.toLowerCase().trim() : "student",
       createdAt: new Date(),
     };
 
@@ -452,12 +431,13 @@ app.patch("/students/:id", async (req, res) => {
     const { id } = req.params;
     if (!isValidObjectId(id)) return res.status(400).json({ success: false, message: "Invalid student ID!" });
 
-    const { name, email, group, roll } = req.body;
+    const { name, email, group, roll, role } = req.body;
     const updateData = {};
     if (name) updateData.name = name.trim();
     if (email) updateData.email = email.toLowerCase().trim();
     if (group) updateData.group = group;
     if (roll) updateData.roll = roll.trim();
+    if (role) updateData.role = role.toLowerCase().trim();
 
     const result = await studentsCollection.updateOne({ _id: new ObjectId(id) }, { $set: updateData });
     if (!result.matchedCount) return res.status(404).json({ success: false, message: "Student not found!" });
@@ -484,14 +464,8 @@ app.delete("/students/:id", async (req, res) => {
 });
 
 /* =========================================================
-   LOGIN
+   LOGIN (JWT REMOVED COMPLETELY)
 ========================================================= */
-
-
-/* =========================================================
-   LOGIN — FIXED
-========================================================= */
-
 
 app.post("/login", async (req, res) => {
   try {
@@ -520,18 +494,31 @@ app.post("/login", async (req, res) => {
       });
     }
 
+    const cleanName = name.trim();
+    const identifier = emailOrRoll.trim();
+
     const student = await studentsCollection.findOne({
-      name: name.trim(),
+      name: cleanName,
       $or: [
-        { email: emailOrRoll.trim().toLowerCase() },
-        { roll: emailOrRoll.trim() },
+        { email: identifier.toLowerCase() },
+        { roll: identifier },
       ],
     });
 
-    if (!student || !student.password) {
+    if (!student) {
       return res.status(401).json({
         success: false,
         message: "Invalid name, email/roll or password.",
+      });
+    }
+
+    if (
+      typeof student.password !== "string" ||
+      !student.password
+    ) {
+      return res.status(401).json({
+        success: false,
+        message: "Account password is not configured.",
       });
     }
 
@@ -547,6 +534,11 @@ app.post("/login", async (req, res) => {
       });
     }
 
+    const role = String(student.role || "student")
+      .trim()
+      .toLowerCase();
+
+    // টোকেন জেনারেশনের অংশ পুরোপুরি বাদ দিয়ে সরাসরি ইউজার ডাটা রেসপন্স দেওয়া হচ্ছে
     return res.status(200).json({
       success: true,
       message: `Welcome back, ${student.name}!`,
@@ -556,7 +548,7 @@ app.post("/login", async (req, res) => {
         email: student.email || "",
         group: student.group || "All",
         roll: student.roll || "",
-        role: String(student.role || "student").toLowerCase(),
+        role,
         createdAt: student.createdAt || null,
       },
     });
@@ -754,6 +746,7 @@ app.delete("/notes/:id", async (req, res) => {
     const note = await notesCollection.findOne({ _id: new ObjectId(id) });
     if (!note) return res.status(404).json({ success: false, message: "Note not found!" });
 
+    Profile:
     if (note.fileName) {
       const filePath = path.join(uploadDir, note.fileName);
       if (fs.existsSync(filePath)) {
