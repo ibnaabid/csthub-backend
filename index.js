@@ -492,6 +492,7 @@ app.delete("/students/:id", async (req, res) => {
    LOGIN — FIXED
 ========================================================= */
 
+
 app.post("/login", async (req, res) => {
   try {
     await connectDB();
@@ -519,31 +520,18 @@ app.post("/login", async (req, res) => {
       });
     }
 
-    const cleanName = name.trim();
-    const identifier = emailOrRoll.trim();
-
     const student = await studentsCollection.findOne({
-      name: cleanName,
+      name: name.trim(),
       $or: [
-        { email: identifier.toLowerCase() },
-        { roll: identifier },
+        { email: emailOrRoll.trim().toLowerCase() },
+        { roll: emailOrRoll.trim() },
       ],
     });
 
-    if (!student) {
+    if (!student || !student.password) {
       return res.status(401).json({
         success: false,
         message: "Invalid name, email/roll or password.",
-      });
-    }
-
-    if (
-      typeof student.password !== "string" ||
-      !student.password
-    ) {
-      return res.status(401).json({
-        success: false,
-        message: "Account password is not configured.",
       });
     }
 
@@ -559,32 +547,16 @@ app.post("/login", async (req, res) => {
       });
     }
 
-    const role = String(student.role || "student")
-      .trim()
-      .toLowerCase();
-
-    const token = jwt.sign(
-      {
-        userId: student._id.toString(),
-        name: student.name,
-        email: student.email || "",
-        role,
-      },
-      JWT_SECRET,
-      { expiresIn: "7d" }
-    );
-
     return res.status(200).json({
       success: true,
       message: `Welcome back, ${student.name}!`,
-      token,
       user: {
         _id: student._id.toString(),
         name: student.name,
         email: student.email || "",
         group: student.group || "All",
         roll: student.roll || "",
-        role,
+        role: String(student.role || "student").toLowerCase(),
         createdAt: student.createdAt || null,
       },
     });
