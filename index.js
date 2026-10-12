@@ -210,190 +210,105 @@ const io = new Server(server, {
   transports: ["websocket", "polling"],
 });
 
-const studyRooms = new Map(); // roomId -> Map(socketId -> participantData)
-const MAX_ROOM_USERS = 5;
+const roomUsersMap = new Map();
 
 io.on("connection", (socket) => {
-  const userId = String(socket.handshake.auth?.userId || `guest-${socket.id}`);
-  const userName = String(socket.handshake.auth?.userName || "Student").trim() || "Student";
+  console.log("⚡ New user connected:", socket.id);
 
-  socket.data.userId = userId;
-  socket.data.userName = userName;
-  socket.data.roomId = null;
-
-  // ১. রুমে জয়েন করা
+  // স্টাডি রুমে জয়েন করার ইভেন্ট
   socket.on("join-study-room", (roomId) => {
-    try {
-      const cleanRoomId = String(roomId || "").trim();
-      if (!cleanRoomId) {
-        socket.emit("room-error", { message: "Invalid room ID" });
-        return;
-      }
+    socket.join(roomId);
 
-      // যদি ইউজার আগে থেকেই অন্য কোনো রুমে থাকে, তবে সেখান থেকে রিমুভ করে দেবো
-      if (socket.data.roomId && socket.data.roomId !== cleanRoomId) {
-        removeUserFromStudyRoom(socket);
-      }
+    // ইউজার নেম বের করা
+    const userName =
+      socket.handshake.auth?.userName || `Student_${socket.id.slice(0, 4)}`;
 
-      if (!studyRooms.has(cleanRoomId)) {
-        studyRooms.set(cleanRoomId, new Map());
-      }
-
-      const room = studyRooms.get(cleanRoomId);
-      if (room.has(socket.id)) return;
-
-      if (room.size >= MAX_ROOM_USERS) {
-        socket.emit("room-full", { maxUsers: MAX_ROOM_USERS });
-        return;
-      }
-
-      const participant = {
-        socketId: socket.id,
-        userId: socket.data.userId,
-        userName: socket.data.userName,
-      };
-
-      // বর্তমান রুমে থাকা অন্য ইউজারদের তালিকা তুলব
-      const existingUsers = Array.from(room.values());
-      
-      // নতুন ইউজারকে রুমে অ্যাড করব
-      room.set(socket.id, participant);
-      socket.join(cleanRoomId);
-      socket.data.roomId = cleanRoomId;
-
-      // নতুন ইউজারকে বলব কারা কারা অলরেডি রুমে আছে
-      socket.emit("room-users", { users: existingUsers, count: room.size });
-
-      // রুমের বাকি সবাইকে জানাব যে নতুন একজন ইউজার কানেক্ট হয়েছে
-      socket.to(cleanRoomId).emit("user-connected", participant);
-      io.to(cleanRoomId).emit("room-user-count", { count: room.size });
-
-      console.log(`✅ User ${userName} (${socket.id}) joined room: ${cleanRoomId}`);
-    } catch (error) {
-      console.error("❌ Join room error:", error);
+    if (!roomUsersMap.has(roomId)) {
+      roomUsersMap.set(roomId, new Map());
     }
+
+    const roomUsers = roomUsersMap.get(roomId);
+    roomUsers.set(socket.id, { socketId: socket.id, userName });
+
+    const usersArray = Array.from(roomUsers.values());
+
+    console.log(`👤 ${userName} (${socket.id}) joined room: ${roomId}`);
+    console.log(`📊 Total users in room ${roomId}: ${usersArray.length}`);
+
+    // ১. রুমে থাকা সবাইকে আপডেট ইউজার লিস্ট পাঠানো (যাতে কাউন্ট ২ জন দেখায়)
+    io.to(roomId).emit("room-users", { users: usersArray });
+
+    // ২. নতুন ইউজার ঢুকেছে বার্তা আগের মেম্বারদের পাঠানো
+    socket.to(roomId).emit("user-connected", {
+      socketId: socket.id,
+      userName,
+    });
   });
 
-  // ২. WebRTC Offer পাঠানো
-  socket.on("offer", (payload) => {
-    try {
-      if (!payload || !payload.target || !payload.offer) return;
-      const { target, offer } = payload;
-      
-      const targetSocket = io.sockets.sockets.get(target);
-      if (!targetSocket) return;
-
-      targetSocket.emit("offer", {
-        offer,
-        caller: socket.id,
-        callerUserId: socket.data.userId || "",
-        callerUserName: socket.data.userName || "Student",
-      });
-    } catch (error) {
-      console.error("❌ Offer error:", error);
-    }
+  // WebRTC Offer
+  socket.on("offer", ({ target, offer, senderName }) => {
+    io.to(target).emit("offer", {
+      offer,
+      caller: socket.id,
+      callerUserName: senderName,
+    });
   });
 
-  // ৩. WebRTC Answer পাঠানো
-  socket.on("answer", (payload) => {
-    try {
-      if (!payload || !payload.target || !payload.answer) return;
-      const { target, answer } = payload;
-
-      const targetSocket = io.sockets.sockets.get(target);
-      if (!targetSocket) return;
-
-      targetSocket.emit("answer", {
-        answer,
-        responder: socket.id,
-        answerer: socket.id,
-        responderUserId: socket.data.userId || "",
-        responderUserName: socket.data.userName || "Student",
-      });
-    } catch (error) {
-      console.error("❌ Answer error:", error);
-    }
+  // WebRTC Answer
+  socket.on("answer", ({ target, answer }) => {
+    io.to(target).emit("answer", {
+      answer,
+      responder: socket.id,
+    });
   });
 
-  // ৪. ICE Candidate আদান-প্রদান
-  socket.on("ice-candidate", (payload) => {
-    try {
-      if (!payload || !payload.target || !payload.candidate) return;
-      const { target, candidate } = payload;
-
-      const targetSocket = io.sockets.sockets.get(target);
-      if (!targetSocket) return;
-
-      targetSocket.emit("ice-candidate", {
-        candidate,
-        sender: socket.id,
-      });
-    } catch (error) {
-      console.error("❌ ICE error:", error);
-    }
+  // ICE Candidate exchange
+  socket.on("ice-candidate", ({ target, candidate }) => {
+    io.to(target).emit("ice-candidate", {
+      candidate,
+      sender: socket.id,
+    });
   });
 
-  // ৫. রুমের চ্যাট মেসেজ
-  socket.on("chat-message", (payload) => {
-    try {
-      if (!payload) return;
-      const { roomId, text } = payload;
-      const cleanRoomId = String(roomId || "").trim();
-      const cleanText = String(text || "").trim();
+  // Real-time Chat Messaging
+  socket.on("chat-message", ({ roomId, text }) => {
+    const userName =
+      socket.handshake.auth?.userName || `Student_${socket.id.slice(0, 4)}`;
 
-      if (!cleanRoomId || !cleanText || socket.data.roomId !== cleanRoomId) return;
-
-      const room = studyRooms.get(cleanRoomId);
-      if (!room || !room.has(socket.id)) return;
-
-      socket.to(cleanRoomId).emit("chat-message", {
-        sender: socket.data.userName || "Student",
-        senderId: socket.id,
-        text: cleanText,
-        createdAt: new Date().toISOString(),
-      });
-    } catch (error) {
-      console.error("❌ Chat error:", error);
-    }
+    socket.to(roomId).emit("chat-message", {
+      sender: userName,
+      text,
+    });
   });
 
-  // ৬. রুম থেকে বের হয়ে যাওয়া
-  socket.on("leave-study-room", () => {
-    removeUserFromStudyRoom(socket);
-  });
-
+  // ডিসকানেক্ট হ্যান্ডলার
   socket.on("disconnecting", () => {
-    removeUserFromStudyRoom(socket);
+    console.log("❌ User disconnecting:", socket.id);
+
+    socket.rooms.forEach((roomId) => {
+      if (roomUsersMap.has(roomId)) {
+        const roomUsers = roomUsersMap.get(roomId);
+        const user = roomUsers.get(socket.id);
+
+        roomUsers.delete(socket.id);
+
+        if (roomUsers.size === 0) {
+          roomUsersMap.delete(roomId);
+        } else {
+          // রুমের বাকিদের আপডেট ইনফো পাঠানো
+          io.to(roomId).emit("user-disconnected", {
+            socketId: socket.id,
+            userName: user?.userName || "User",
+          });
+
+          io.to(roomId).emit("room-users", {
+            users: Array.from(roomUsers.values()),
+          });
+        }
+      }
+    });
   });
 });
-
-function removeUserFromStudyRoom(socket) {
-  const roomId = socket.data.roomId;
-  if (!roomId) return;
-
-  const room = studyRooms.get(roomId);
-  if (!room) {
-    socket.data.roomId = null;
-    return;
-  }
-
-  const participant = room.get(socket.id);
-  room.delete(socket.id);
-
-  socket.to(roomId).emit("user-disconnected", {
-    socketId: socket.id,
-    userId: participant?.userId || socket.data.userId || "",
-    userName: participant?.userName || socket.data.userName || "Student",
-  });
-
-  io.to(roomId).emit("room-user-count", { count: room.size });
-  socket.leave(roomId);
-
-  if (room.size === 0) {
-    studyRooms.delete(roomId);
-  }
-  socket.data.roomId = null;
-}
 /* =========================================================
    MULTER PDF
 ========================================================= */
