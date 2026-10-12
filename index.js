@@ -373,51 +373,86 @@ const isValidObjectId = (id) => ObjectId.isValid(id);
    STUDENTS (REGISTER)
 ========================================================= */
 
-app.post("/students", async (req, res) => {
+app.post("/login", async (req, res) => {
   try {
     await connectDB();
-    const { name, email, password, group, roll } = req.body;
 
-    if (!name || !email || !password || !group || !roll) {
-      return res.status(400).json({ success: false, message: "All fields are required!" });
+    const { name, emailOrRoll, password } = req.body;
+
+    if (!name || !emailOrRoll || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "All login fields are required!",
+      });
     }
 
     const cleanName = name.trim();
-    const cleanEmail = email.toLowerCase().trim();
-    const cleanRoll = roll.trim();
+    const identifier = emailOrRoll.trim();
 
-    const existingEmail = await studentsCollection.findOne({ email: cleanEmail });
-    if (existingEmail) {
-      return res.status(409).json({ success: false, message: "Email already registered!" });
-    }
-
-    const existingRoll = await studentsCollection.findOne({ roll: cleanRoll });
-    if (existingRoll) {
-      return res.status(409).json({ success: false, message: "Roll number already registered!" });
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    const student = {
+    const student = await studentsCollection.findOne({
       name: cleanName,
-      email: cleanEmail,
-      password: hashedPassword,
-      group,
-      roll: cleanRoll,
-      role: "student",
-      createdAt: new Date(),
+      $or: [
+        { email: identifier.toLowerCase() },
+        { roll: identifier },
+      ],
+    });
+
+    if (!student) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid credentials!",
+      });
+    }
+
+    const validPassword = await bcrypt.compare(
+      password,
+      student.password
+    );
+
+    if (!validPassword) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid credentials!",
+      });
+    }
+
+    // MongoDB-তে সংরক্ষিত role ব্যবহার হবে
+    const role = String(student.role || "student")
+      .trim()
+      .toLowerCase();
+
+    const tokenPayload = {
+      userId: student._id.toString(),
+      name: student.name,
+      email: student.email,
+      role,
     };
 
-    const result = await studentsCollection.insertOne(student);
+    const token = jwt.sign(tokenPayload, JWT_SECRET, {
+      expiresIn: "7d",
+    });
 
-    res.status(201).json({
+    return res.json({
       success: true,
-      message: "Student registered successfully!",
-      insertedId: result.insertedId,
+      message: `Welcome back, ${student.name}!`,
+      token,
+      user: {
+        _id: student._id,
+        name: student.name,
+        email: student.email,
+        group: student.group,
+        roll: student.roll,
+        role,
+        createdAt: student.createdAt,
+      },
     });
   } catch (error) {
-    console.error("Register error:", error);
-    res.status(500).json({ success: false, message: "Failed to register student!" });
+    console.error("Login error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Login failed!",
+    });
   }
 });
 
