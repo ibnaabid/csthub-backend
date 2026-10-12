@@ -373,86 +373,51 @@ const isValidObjectId = (id) => ObjectId.isValid(id);
    STUDENTS (REGISTER)
 ========================================================= */
 
-app.post("/login", async (req, res) => {
+app.post("/students", async (req, res) => {
   try {
     await connectDB();
+    const { name, email, password, group, roll } = req.body;
 
-    const { name, emailOrRoll, password } = req.body;
-
-    if (!name || !emailOrRoll || !password) {
-      return res.status(400).json({
-        success: false,
-        message: "All login fields are required!",
-      });
+    if (!name || !email || !password || !group || !roll) {
+      return res.status(400).json({ success: false, message: "All fields are required!" });
     }
 
     const cleanName = name.trim();
-    const identifier = emailOrRoll.trim();
+    const cleanEmail = email.toLowerCase().trim();
+    const cleanRoll = roll.trim();
 
-    const student = await studentsCollection.findOne({
+    const existingEmail = await studentsCollection.findOne({ email: cleanEmail });
+    if (existingEmail) {
+      return res.status(409).json({ success: false, message: "Email already registered!" });
+    }
+
+    const existingRoll = await studentsCollection.findOne({ roll: cleanRoll });
+    if (existingRoll) {
+      return res.status(409).json({ success: false, message: "Roll number already registered!" });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const student = {
       name: cleanName,
-      $or: [
-        { email: identifier.toLowerCase() },
-        { roll: identifier },
-      ],
-    });
-
-    if (!student) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid credentials!",
-      });
-    }
-
-    const validPassword = await bcrypt.compare(
-      password,
-      student.password
-    );
-
-    if (!validPassword) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid credentials!",
-      });
-    }
-
-    // MongoDB-তে সংরক্ষিত role ব্যবহার হবে
-    const role = String(student.role || "student")
-      .trim()
-      .toLowerCase();
-
-    const tokenPayload = {
-      userId: student._id.toString(),
-      name: student.name,
-      email: student.email,
-      role,
+      email: cleanEmail,
+      password: hashedPassword,
+      group,
+      roll: cleanRoll,
+      role: "student",
+      createdAt: new Date(),
     };
 
-    const token = jwt.sign(tokenPayload, JWT_SECRET, {
-      expiresIn: "7d",
-    });
+    const result = await studentsCollection.insertOne(student);
 
-    return res.json({
+    res.status(201).json({
       success: true,
-      message: `Welcome back, ${student.name}!`,
-      token,
-      user: {
-        _id: student._id,
-        name: student.name,
-        email: student.email,
-        group: student.group,
-        roll: student.roll,
-        role,
-        createdAt: student.createdAt,
-      },
+      message: "Student registered successfully!",
+      insertedId: result.insertedId,
     });
   } catch (error) {
-    console.error("Login error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Login failed!",
-    });
+    console.error("Register error:", error);
+    res.status(500).json({ success: false, message: "Failed to register student!" });
   }
 });
 
@@ -522,58 +487,114 @@ app.delete("/students/:id", async (req, res) => {
    LOGIN
 ========================================================= */
 
+
+/* =========================================================
+   LOGIN — FIXED
+========================================================= */
+
 app.post("/login", async (req, res) => {
   try {
     await connectDB();
-    const { name, emailOrRoll, password } = req.body;
 
-    if (!name || !emailOrRoll || !password) {
-      return res.status(400).json({ success: false, message: "All login fields are required!" });
+    if (!studentsCollection) {
+      return res.status(503).json({
+        success: false,
+        message: "Database is not connected.",
+      });
     }
 
+    const { name, emailOrRoll, password } = req.body || {};
+
+    if (
+      typeof name !== "string" ||
+      typeof emailOrRoll !== "string" ||
+      typeof password !== "string" ||
+      !name.trim() ||
+      !emailOrRoll.trim() ||
+      !password
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Name, email/roll and password are required.",
+      });
+    }
+
+    const cleanName = name.trim();
+    const identifier = emailOrRoll.trim();
+
     const student = await studentsCollection.findOne({
-      name: name.trim(),
+      name: cleanName,
       $or: [
-        { email: emailOrRoll.toLowerCase().trim() },
-        { roll: emailOrRoll.trim() },
+        { email: identifier.toLowerCase() },
+        { roll: identifier },
       ],
     });
 
     if (!student) {
-      return res.status(401).json({ success: false, message: "Invalid credentials!" });
+      return res.status(401).json({
+        success: false,
+        message: "Invalid name, email/roll or password.",
+      });
     }
 
-    const isPasswordValid = await bcrypt.compare(password, student.password);
-    if (!isPasswordValid) {
-      return res.status(401).json({ success: false, message: "Invalid credentials!" });
+    if (
+      typeof student.password !== "string" ||
+      !student.password
+    ) {
+      return res.status(401).json({
+        success: false,
+        message: "Account password is not configured.",
+      });
     }
 
-    const tokenPayload = {
-      userId: student._id,
-      name: student.name,
-      email: student.email,
-      role: student.role || "student",
-    };
+    const passwordValid = await bcrypt.compare(
+      password,
+      student.password
+    );
 
-    const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: "7d" });
+    if (!passwordValid) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid name, email/roll or password.",
+      });
+    }
 
-    res.json({
+    const role = String(student.role || "student")
+      .trim()
+      .toLowerCase();
+
+    const token = jwt.sign(
+      {
+        userId: student._id.toString(),
+        name: student.name,
+        email: student.email || "",
+        role,
+      },
+      JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    return res.status(200).json({
       success: true,
       message: `Welcome back, ${student.name}!`,
       token,
       user: {
-        _id: student._id,
+        _id: student._id.toString(),
         name: student.name,
-        email: student.email,
-        group: student.group,
-        roll: student.roll,
-        role: student.role || "student",
-        createdAt: student.createdAt,
+        email: student.email || "",
+        group: student.group || "All",
+        roll: student.roll || "",
+        role,
+        createdAt: student.createdAt || null,
       },
     });
   } catch (error) {
     console.error("Login error:", error);
-    res.status(500).json({ success: false, message: "Login failed!" });
+
+    return res.status(500).json({
+      success: false,
+      message: "Login failed. Please try again.",
+    });
   }
 });
 
