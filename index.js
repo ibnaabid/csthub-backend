@@ -45,37 +45,82 @@ app.use(
    ONESIGNAL NOTIFICATION HELPER
 ========================================================= */
 
-async function sendOneSignalNotification({ title, message, data = {} }) {
+async function sendOneSignalNotification({
+  title,
+  message,
+  data = {},
+}) {
   try {
-    const appId = process.env.ONESIGNAL_APP_ID;
-    const apiKey = process.env.ONESIGNAL_API_KEY;
+    const appId = process.env.ONESIGNAL_APP_ID || process.env.ONESIGNAL_APP_ID_2;
+    const apiKey =
+      process.env.KEY_ID ||
+      process.env.KEY_ID;
 
     if (!appId || !apiKey) {
-      console.log("⚠️ OneSignal credentials missing. Notification skipped.");
-      return;
+      console.error(
+        "OneSignal credentials missing. Check Render Environment Variables."
+      );
+
+      return {
+        success: false,
+        reason: "missing_credentials",
+      };
     }
 
     const payload = {
       app_id: appId,
-      included_segments: ["All"],
-      headings: { en: title },
-      contents: { en: message },
-      data: data,
+      included_segments: ["Subscribed Users"],
+      headings: {
+        en: title || "CST Hub Update",
+      },
+      contents: {
+        en: message || "A new update is available on CST Hub.",
+      },
+      data,
+      url: "https://cst-hub.vercel.app",
     };
 
-    const response = await fetch("https://onesignal.com/api/v1/notifications", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
-        "Authorization": `Basic ${apiKey}`,
-      },
-      body: JSON.stringify(payload),
-    });
+    const response = await fetch(
+      "https://api.onesignal.com/notifications",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Key ${apiKey}`,
+        },
+        body: JSON.stringify(payload),
+      }
+    );
 
     const result = await response.json();
-    console.log("🔔 OneSignal Notification Sent:", result);
+
+    if (!response.ok || result.errors) {
+      console.error("OneSignal API failed:", {
+        status: response.status,
+        result,
+      });
+
+      return {
+        success: false,
+        status: response.status,
+        error: result.errors || result,
+      };
+    }
+
+    console.log("OneSignal notification accepted:", result);
+
+    return {
+      success: true,
+      id: result.id,
+      recipients: result.recipients,
+    };
   } catch (error) {
-    console.error("❌ OneSignal Notification Error (Ignored):", error.message);
+    console.error("OneSignal notification error:", error.message);
+
+    return {
+      success: false,
+      error: error.message,
+    };
   }
 }
 
