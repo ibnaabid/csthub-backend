@@ -2,7 +2,7 @@
 const APP_ID = process.env.ONESIGNAL_APP_ID;
 const API_KEY = process.env.ONESIGNAL_REST_API_KEY;
 
-export async function sendNotification({
+async function sendNotification({
   title,
   publisher,
   group = "All",
@@ -10,13 +10,8 @@ export async function sendNotification({
   description = "",
 }) {
   if (!APP_ID || !API_KEY) {
-    throw new Error("OneSignal App ID/API Key missing");
+    throw new Error("OneSignal App ID or REST API Key missing");
   }
-
-  const heading = `${category} • Posted by ${publisher}`;
-  const content = `[${group}] ${title}${
-    description ? ` — ${description}` : ""
-  }`;
 
   const response = await fetch(
     "https://api.onesignal.com/notifications",
@@ -29,8 +24,14 @@ export async function sendNotification({
       body: JSON.stringify({
         app_id: APP_ID,
         included_segments: ["Subscribed Users"],
-        headings: { en: heading },
-        contents: { en: content },
+        headings: {
+          en: `${category} • Posted by ${publisher}`,
+        },
+        contents: {
+          en: `[${group}] ${title}${
+            description ? ` — ${description}` : ""
+          }`,
+        },
         url: "https://cst-hub.vercel.app",
         data: {
           publisher,
@@ -44,19 +45,15 @@ export async function sendNotification({
 
   const result = await response.json();
 
-  if (!response.ok) {
-    console.error("OneSignal failed:", result);
-    throw new Error("Notification send failed");
-  }
+  console.log("OneSignal response:", result);
 
-  console.log("Notification sent:", {
-    title,
-    publisher,
-    group,
-    category,
-    recipients: result.recipients,
-    notificationId: result.id,
-  });
+  if (!response.ok || result.errors) {
+    throw new Error(
+      `OneSignal failed: ${JSON.stringify(result.errors || result)}`
+    );
+  }
 
   return result;
 }
+
+module.exports = { sendNotification };
