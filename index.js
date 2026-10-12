@@ -201,12 +201,16 @@ app.post(
    SOCKET.IO STUDY ROOM
 ========================================================= */
 
+/* =========================================================
+   SOCKET.IO STUDY ROOM (UPDATED & FIXED)
+========================================================= */
+
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
   transports: ["websocket", "polling"],
 });
 
-const studyRooms = new Map();
+const studyRooms = new Map(); // roomId -> Map(socketId -> participantData)
 const MAX_ROOM_USERS = 5;
 
 io.on("connection", (socket) => {
@@ -217,6 +221,7 @@ io.on("connection", (socket) => {
   socket.data.userName = userName;
   socket.data.roomId = null;
 
+  // ১. রুমে জয়েন করা
   socket.on("join-study-room", (roomId) => {
     try {
       const cleanRoomId = String(roomId || "").trim();
@@ -225,6 +230,7 @@ io.on("connection", (socket) => {
         return;
       }
 
+      // যদি ইউজার আগে থেকেই অন্য কোনো রুমে থাকে, তবে সেখান থেকে রিমুভ করে দেবো
       if (socket.data.roomId && socket.data.roomId !== cleanRoomId) {
         removeUserFromStudyRoom(socket);
       }
@@ -247,28 +253,35 @@ io.on("connection", (socket) => {
         userName: socket.data.userName,
       };
 
+      // বর্তমান রুমে থাকা অন্য ইউজারদের তালিকা তুলব
       const existingUsers = Array.from(room.values());
+      
+      // নতুন ইউজারকে রুমে অ্যাড করব
       room.set(socket.id, participant);
       socket.join(cleanRoomId);
       socket.data.roomId = cleanRoomId;
 
+      // নতুন ইউজারকে বলব কারা কারা অলরেডি রুমে আছে
       socket.emit("room-users", { users: existingUsers, count: room.size });
+
+      // রুমের বাকি সবাইকে জানাব যে নতুন একজন ইউজার কানেক্ট হয়েছে
       socket.to(cleanRoomId).emit("user-connected", participant);
       io.to(cleanRoomId).emit("room-user-count", { count: room.size });
+
+      console.log(`✅ User ${userName} (${socket.id}) joined room: ${cleanRoomId}`);
     } catch (error) {
       console.error("❌ Join room error:", error);
     }
   });
 
+  // ২. WebRTC Offer পাঠানো
   socket.on("offer", (payload) => {
     try {
       if (!payload || !payload.target || !payload.offer) return;
       const { target, offer } = payload;
       
       const targetSocket = io.sockets.sockets.get(target);
-      if (!targetSocket || targetSocket.data.roomId !== socket.data.roomId || !socket.data.roomId) {
-        return;
-      }
+      if (!targetSocket) return;
 
       targetSocket.emit("offer", {
         offer,
@@ -281,15 +294,14 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ৩. WebRTC Answer পাঠানো
   socket.on("answer", (payload) => {
     try {
       if (!payload || !payload.target || !payload.answer) return;
       const { target, answer } = payload;
 
       const targetSocket = io.sockets.sockets.get(target);
-      if (!targetSocket || targetSocket.data.roomId !== socket.data.roomId || !socket.data.roomId) {
-        return;
-      }
+      if (!targetSocket) return;
 
       targetSocket.emit("answer", {
         answer,
@@ -303,15 +315,14 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ৪. ICE Candidate আদান-প্রদান
   socket.on("ice-candidate", (payload) => {
     try {
       if (!payload || !payload.target || !payload.candidate) return;
       const { target, candidate } = payload;
 
       const targetSocket = io.sockets.sockets.get(target);
-      if (!targetSocket || targetSocket.data.roomId !== socket.data.roomId || !socket.data.roomId) {
-        return;
-      }
+      if (!targetSocket) return;
 
       targetSocket.emit("ice-candidate", {
         candidate,
@@ -322,6 +333,7 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ৫. রুমের চ্যাট মেসেজ
   socket.on("chat-message", (payload) => {
     try {
       if (!payload) return;
@@ -345,6 +357,7 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ৬. রুম থেকে বের হয়ে যাওয়া
   socket.on("leave-study-room", () => {
     removeUserFromStudyRoom(socket);
   });
@@ -381,7 +394,6 @@ function removeUserFromStudyRoom(socket) {
   }
   socket.data.roomId = null;
 }
-
 /* =========================================================
    MULTER PDF
 ========================================================= */
