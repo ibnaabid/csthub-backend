@@ -1,16 +1,18 @@
 
 const APP_ID = process.env.ONESIGNAL_APP_ID;
-const API_KEY = process.env.ONESIGNAL_REST_API_KEY;
+const API_KEY = process.env.KEY_ID;
 
 async function sendNotification({
   title,
-  publisher,
+  publisher = "CST Hub",
   group = "All",
   category = "Notice",
   description = "",
 }) {
   if (!APP_ID || !API_KEY) {
-    throw new Error("OneSignal App ID or REST API Key missing");
+    throw new Error(
+      "Missing ONESIGNAL_APP_ID or KEY_ID"
+    );
   }
 
   const response = await fetch(
@@ -45,6 +47,7 @@ async function sendNotification({
 
   const result = await response.json();
 
+  console.log("OneSignal HTTP status:", response.status);
   console.log("OneSignal response:", result);
 
   if (!response.ok || result.errors) {
