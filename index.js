@@ -201,14 +201,14 @@ app.get("/health", async (req, res) => {
 ========================================================= */
 
 async function sendFCMNotification({
-  title,
-  message,
+  title = "CST Hub",
+  message = "নতুন আপডেট এসেছে।",
   data = {},
   group = "All",
 }) {
   try {
     if (admin.apps.length === 0) {
-      console.warn("FCM skipped: Firebase Admin is not initialized.");
+      console.error("❌ Firebase Admin is not initialized.");
 
       return {
         success: false,
@@ -222,6 +222,9 @@ async function sendFCMNotification({
 
     const targetGroup = cleanString(group, "All");
 
+    // All notice -> all devices
+    // Group A notice -> Group A + All devices
+    // Group B notice -> Group B + All devices
     const query =
       targetGroup.toLowerCase() === "all"
         ? {}
@@ -232,11 +235,11 @@ async function sendFCMNotification({
             ],
           };
 
-    const tokens = await fcmTokensCollection
-      .find(query)
-      .toArray();
+    const records = await fcmTokensCollection.find(query).toArray();
 
-    if (tokens.length === 0) {
+    if (!records.length) {
+      console.log("ℹ️ No subscribed devices for group:", targetGroup);
+
       return {
         success: true,
         sent: 0,
@@ -248,57 +251,87 @@ async function sendFCMNotification({
     let sent = 0;
     let failed = 0;
 
-    for (const record of tokens) {
+    const invalidTokenCodes = new Set([
+      "messaging/registration-token-not-registered",
+      "messaging/invalid-registration-token",
+    ]);
+
+    for (const record of records) {
       if (!record.token) {
         failed++;
         continue;
       }
 
+      const notificationTitle = String(title);
+      const notificationBody = String(message);
+      const notificationUrl = String(
+        data.url || "https://cst-hub.vercel.app"
+      );
+
+      // FCM data values must all be strings.
       const messageData = {};
 
-      for (const [key, value] of Object.entries(data || {})) {
+      for (const [key, value] of Object.entries(data)) {
         if (value !== undefined && value !== null) {
           messageData[key] = String(value);
         }
       }
 
-      messageData.title = String(title || "CST Hub Update");
-      messageData.body = String(
-        message || "CST Hub-এ নতুন আপডেট এসেছে।"
-      );
-      messageData.url = String(
-        data?.url || "https://cst-hub.vercel.app"
-      );
+      messageData.title = notificationTitle;
+      messageData.body = notificationBody;
+      messageData.url = notificationUrl;
 
       try {
         await admin.messaging().send({
           token: record.token,
+
+          // Display notification when app is in the background.
+          notification: {
+            title: notificationTitle,
+            body: notificationBody,
+          },
+
           data: messageData,
+
           webpush: {
             headers: {
               Urgency: "high",
+            },
+
+            notification: {
+              title: notificationTitle,
+              body: notificationBody,
+              icon: "https://cst-hub.vercel.app/icon.png",
+            },
+
+            fcmOptions: {
+              link: notificationUrl,
             },
           },
         });
 
         sent++;
+
+        console.log(
+          `✅ FCM sent to group: ${record.group || "All"}`
+        );
       } catch (error) {
         failed++;
 
         console.error(
-          "FCM send error:",
+          "❌ FCM send failed:",
           error.code || error.message
         );
 
-        const invalidTokenCodes = [
-          "messaging/registration-token-not-registered",
-          "messaging/invalid-registration-token",
-        ];
-
-        if (invalidTokenCodes.includes(error.code)) {
+        if (invalidTokenCodes.has(error.code)) {
           await fcmTokensCollection
             .deleteOne({ _id: record._id })
-            .catch(() => {});
+            .catch((deleteError) => {
+              console.error(
+                "Failed to delete invalid token:",
+                deleteError.message
+              );
+            });
         }
       }
     }
@@ -307,13 +340,15 @@ async function sendFCMNotification({
       success: failed === 0,
       sent,
       failed,
+      total: records.length,
+      group: targetGroup,
     };
 
-    console.log("FCM result:", result);
+    console.log("📱 FCM notification result:", result);
 
     return result;
   } catch (error) {
-    console.error("FCM notification error:", error.message);
+    console.error("❌ FCM notification error:", error);
 
     return {
       success: false,
