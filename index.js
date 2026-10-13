@@ -1,3 +1,4 @@
+
 const dotenv = require("dotenv");
 dotenv.config();
 
@@ -8,6 +9,7 @@ const path = require("path");
 const fs = require("fs");
 const os = require("os");
 const http = require("http");
+const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
 const { Server } = require("socket.io");
 const { GoogleGenAI } = require("@google/genai");
@@ -19,106 +21,96 @@ const {
   ObjectId,
 } = require("mongodb");
 
+/* =========================================================
+   APP CONFIGURATION
+========================================================= */
+
 const app = express();
 const server = http.createServer(app);
-const port = process.env.PORT || 8000;
+const PORT = process.env.PORT || 8000;
+
+app.disable("x-powered-by");
+
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL
+      ? process.env.FRONTEND_URL.split(",").map((url) => url.trim())
+      : "*",
+    methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
+
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 /* =========================================================
-   FIREBASE ADMIN INITIALIZATION
+   UPLOAD DIRECTORY
+========================================================= */
+
+const uploadDir =
+  process.env.UPLOAD_DIR ||
+  (process.env.NODE_ENV === "production"
+    ? path.join(os.tmpdir(), "csthub-uploads")
+    : path.join(__dirname, "uploads"));
+
+fs.mkdirSync(uploadDir, { recursive: true });
+
+app.use("/uploads", express.static(uploadDir));
+
+/* =========================================================
+   FIREBASE ADMIN
 ========================================================= */
 
 try {
-  if (
-    process.env.FIREBASE_SERVICE_ACCOUNT_JSON &&
-    !admin.apps.length
-  ) {
-    const serviceAccount = JSON.parse(
-      process.env.FIREBASE_SERVICE_ACCOUNT_JSON
-    );
+  const serviceAccountJSON =
+    process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+
+  if (serviceAccountJSON && admin.apps.length === 0) {
+    const serviceAccount = JSON.parse(serviceAccountJSON);
 
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
     });
 
-    console.log("✅ Firebase Admin initialized");
-  } else if (!process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-    console.warn("⚠️ FIREBASE_SERVICE_ACCOUNT_JSON missing");
+    console.log("Firebase Admin initialized.");
+  } else if (!serviceAccountJSON) {
+    console.warn(
+      "FIREBASE_SERVICE_ACCOUNT_JSON is missing. Push notifications are disabled."
+    );
   }
 } catch (error) {
-  console.error(
-    "❌ Firebase initialization failed:",
-    error.message
-  );
+  console.error("Firebase initialization failed:", error.message);
 }
-
-/* =========================================================
-   MIDDLEWARE
-========================================================= */
-
-app.use(
-  cors({
-    origin: "*",
-    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-  })
-);
-
-app.use(
-  express.json({
-    limit: "60mb",
-  })
-);
-
-/* =========================================================
-   UPLOAD FOLDER
-========================================================= */
-
-const uploadDir =
-  process.env.NODE_ENV === "production"
-    ? path.join(os.tmpdir(), "csthub-uploads")
-    : path.join(__dirname, "uploads");
-
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-app.use("/uploads", express.static(uploadDir));
-
-/* =========================================================
-   HOME
-========================================================= */
-
-app.get("/", (req, res) => {
-  res.json({
-    success: true,
-    message: "CST HUB Backend is running 🚀",
-    time: new Date().toISOString(),
-  });
-});
 
 /* =========================================================
    MONGODB
 ========================================================= */
 
-const uri = process.env.MONGODB_URI;
+const mongoURI = process.env.MONGODB_URI;
 
-let client;
+let mongoClient;
+let db;
 let studentsCollection;
 let noticesCollection;
 let notesCollection;
 let fcmTokensCollection;
-let dbReady = false;
+
 let dbConnectionPromise = null;
 
 async function connectDB() {
-  if (dbReady) return;
-  if (dbConnectionPromise) return dbConnectionPromise;
+  if (db) return db;
 
-  if (!uri) {
-    throw new Error("MONGODB_URI is missing");
+  if (dbConnectionPromise) {
+    return dbConnectionPromise;
+  }
+
+  if (!mongoURI) {
+    throw new Error("MONGODB_URI is missing in environment variables.");
   }
 
   dbConnectionPromise = (async () => {
-    client = new MongoClient(uri, {
+    const newClient = new MongoClient(mongoURI, {
       serverApi: {
         version: ServerApiVersion.v1,
         strict: true,
@@ -126,32 +118,86 @@ async function connectDB() {
       },
     });
 
-    await client.connect();
+    await newClient.connect();
 
-    const db = client.db("CST");
+    const database = newClient.db("CST");
 
-    studentsCollection = db.collection("students");
-    noticesCollection = db.collection("notices");
-    notesCollection = db.collection("notes");
-    fcmTokensCollection = db.collection("fcmTokens");
+    mongoClient = newClient;
+    db = database;
 
-    dbReady = true;
+    studentsCollection = database.collection("students");
+    noticesCollection = database.collection("notices");
+    notesCollection = database.collection("notes");
+    fcmTokensCollection = database.collection("fcmTokens");
 
-    console.log("✅ Connected to MongoDB");
+    console.log("Connected to MongoDB.");
+
+    return database;
   })();
 
   try {
-    await dbConnectionPromise;
+    return await dbConnectionPromise;
   } catch (error) {
     dbConnectionPromise = null;
+
+    if (mongoClient) {
+      await mongoClient.close().catch(() => {});
+    }
+
+    mongoClient = null;
+    db = null;
+
     throw error;
   }
 }
 
-const isValidObjectId = (id) => ObjectId.isValid(id);
+function validObjectId(id) {
+  return typeof id === "string" && ObjectId.isValid(id);
+}
+
+function cleanString(value, fallback = "") {
+  return typeof value === "string" ? value.trim() : fallback;
+}
+
+function sendError(res, status, message) {
+  return res.status(status).json({
+    success: false,
+    message,
+  });
+}
 
 /* =========================================================
-   FIREBASE CLOUD MESSAGING (FCM)
+   HOME / HEALTH CHECK
+========================================================= */
+
+app.get("/", (req, res) => {
+  res.json({
+    success: true,
+    message: "CST HUB Backend is running.",
+    time: new Date().toISOString(),
+  });
+});
+
+app.get("/health", async (req, res) => {
+  try {
+    await connectDB();
+
+    return res.json({
+      success: true,
+      database: "connected",
+      firebase: admin.apps.length > 0 ? "initialized" : "disabled",
+    });
+  } catch (error) {
+    return res.status(503).json({
+      success: false,
+      database: "disconnected",
+      message: error.message,
+    });
+  }
+});
+
+/* =========================================================
+   FIREBASE CLOUD MESSAGING
 ========================================================= */
 
 async function sendFCMNotification({
@@ -160,28 +206,23 @@ async function sendFCMNotification({
   data = {},
   group = "All",
 }) {
-  if (!admin.apps.length) {
-    console.error("❌ Firebase Admin is not initialized");
-
-    return {
-      success: false,
-      reason: "firebase_not_initialized",
-    };
-  }
-
   try {
-    await connectDB();
+    if (admin.apps.length === 0) {
+      console.warn("FCM skipped: Firebase Admin is not initialized.");
 
-    if (!fcmTokensCollection) {
       return {
         success: false,
-        reason: "database_not_ready",
+        sent: 0,
+        failed: 0,
+        reason: "firebase_not_initialized",
       };
     }
 
-    const targetGroup = String(group || "All").trim();
+    await connectDB();
 
-    const tokenQuery =
+    const targetGroup = cleanString(group, "All");
+
+    const query =
       targetGroup.toLowerCase() === "all"
         ? {}
         : {
@@ -191,48 +232,48 @@ async function sendFCMNotification({
             ],
           };
 
-    const records = await fcmTokensCollection
-      .find(tokenQuery)
+    const tokens = await fcmTokensCollection
+      .find(query)
       .toArray();
 
-    if (!records.length) {
-      console.log("ℹ️ No subscribed FCM devices found");
-
+    if (tokens.length === 0) {
       return {
         success: true,
         sent: 0,
         failed: 0,
+        message: "No subscribed devices found.",
       };
     }
 
     let sent = 0;
     let failed = 0;
 
-    for (const record of records) {
-      try {
-        const stringData = {};
+    for (const record of tokens) {
+      if (!record.token) {
+        failed++;
+        continue;
+      }
 
-        for (const [key, value] of Object.entries(data || {})) {
-          if (value !== undefined && value !== null) {
-            stringData[key] = String(value);
-          }
+      const messageData = {};
+
+      for (const [key, value] of Object.entries(data || {})) {
+        if (value !== undefined && value !== null) {
+          messageData[key] = String(value);
         }
+      }
 
-        const response = await admin.messaging().send({
+      messageData.title = String(title || "CST Hub Update");
+      messageData.body = String(
+        message || "CST Hub-এ নতুন আপডেট এসেছে।"
+      );
+      messageData.url = String(
+        data?.url || "https://cst-hub.vercel.app"
+      );
+
+      try {
+        await admin.messaging().send({
           token: record.token,
-
-          // সব data value অবশ্যই string হতে হবে
-          data: {
-            ...stringData,
-            title: String(title || "CST Hub Update"),
-            body: String(
-              message || "CST Hub-এ নতুন আপডেট এসেছে।"
-            ),
-            url: String(
-              data.url || "https://cst-hub.vercel.app"
-            ),
-          },
-
+          data: messageData,
           webpush: {
             headers: {
               Urgency: "high",
@@ -241,29 +282,23 @@ async function sendFCMNotification({
         });
 
         sent++;
-
-        console.log("✅ FCM message sent:", response);
       } catch (error) {
         failed++;
 
         console.error(
-          "❌ FCM send error:",
+          "FCM send error:",
           error.code || error.message
         );
 
-        if (
-          error.code ===
-            "messaging/registration-token-not-registered" ||
-          error.code === "messaging/invalid-registration-token"
-        ) {
+        const invalidTokenCodes = [
+          "messaging/registration-token-not-registered",
+          "messaging/invalid-registration-token",
+        ];
+
+        if (invalidTokenCodes.includes(error.code)) {
           await fcmTokensCollection
             .deleteOne({ _id: record._id })
-            .catch((deleteError) => {
-              console.error(
-                "Failed to remove invalid token:",
-                deleteError.message
-              );
-            });
+            .catch(() => {});
         }
       }
     }
@@ -274,17 +309,16 @@ async function sendFCMNotification({
       failed,
     };
 
-    console.log("📲 FCM notification result:", result);
+    console.log("FCM result:", result);
 
     return result;
   } catch (error) {
-    console.error(
-      "❌ FCM notification error:",
-      error.message
-    );
+    console.error("FCM notification error:", error.message);
 
     return {
       success: false,
+      sent: 0,
+      failed: 0,
       error: error.message,
     };
   }
@@ -301,14 +335,11 @@ app.post("/notifications/subscribe", async (req, res) => {
     const { token, group = "All" } = req.body || {};
 
     if (typeof token !== "string" || !token.trim()) {
-      return res.status(400).json({
-        success: false,
-        message: "Valid FCM token is required.",
-      });
+      return sendError(res, 400, "A valid FCM token is required.");
     }
 
     const cleanToken = token.trim();
-    const cleanGroup = String(group || "All").trim();
+    const cleanGroup = cleanString(group, "All");
 
     await fcmTokensCollection.updateOne(
       { token: cleanToken },
@@ -325,27 +356,30 @@ app.post("/notifications/subscribe", async (req, res) => {
       { upsert: true }
     );
 
-    return res.json({
+    return res.status(200).json({
       success: true,
-      message: "Device subscribed to notifications.",
+      message: "Device subscribed successfully.",
     });
   } catch (error) {
-    console.error("FCM subscribe error:", error.message);
+    console.error("FCM subscription error:", error);
 
-    return res.status(500).json({
-      success: false,
-      message: "Failed to subscribe to notifications.",
-    });
+    return sendError(
+      res,
+      500,
+      "Failed to subscribe to notifications."
+    );
   }
 });
 
 /* =========================================================
-   GEMINI AI
+   GEMINI AI IMAGE EXPLANATION
 ========================================================= */
 
-const geminiClient = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-});
+const geminiClient = process.env.GEMINI_API_KEY
+  ? new GoogleGenAI({
+      apiKey: process.env.GEMINI_API_KEY,
+    })
+  : null;
 
 const aiUpload = multer({
   storage: multer.memoryStorage(),
@@ -353,15 +387,15 @@ const aiUpload = multer({
     fileSize: 10 * 1024 * 1024,
   },
   fileFilter: (req, file, cb) => {
-    const allowed = [
+    const allowedTypes = [
       "image/jpeg",
       "image/png",
       "image/webp",
     ];
 
-    if (!allowed.includes(file.mimetype)) {
+    if (!allowedTypes.includes(file.mimetype)) {
       return cb(
-        new Error("Only JPG, PNG and WEBP images are allowed!")
+        new Error("Only JPG, PNG and WEBP images are allowed.")
       );
     }
 
@@ -377,24 +411,28 @@ app.post(
 
     try {
       if (!req.file) {
-        return res.status(400).json({
-          success: false,
-          message: "Please upload an image.",
-        });
+        return sendError(res, 400, "Please upload an image.");
       }
 
       const question =
-        req.body.question?.trim() ||
-        "এই ছবিটা সহজভাবে বুঝিয়ে দাও।";
+        cleanString(req.body?.question) ||
+        "এই ছবিটি সহজ বাংলায় বুঝিয়ে দাও।";
 
       if (process.env.MOCK_GEMINI === "true") {
         return res.json({
           success: true,
           answer:
-            `🤖 CST HUB AI (Mock Mode)\n\n` +
-            `প্রশ্ন: ${question}\n\n` +
-            "Image successfully received.",
+            `CST HUB AI (Mock Mode)\n\nপ্রশ্ন: ${question}\n\n` +
+            "Image received successfully. Mock mode is enabled.",
         });
+      }
+
+      if (!geminiClient) {
+        return sendError(
+          res,
+          503,
+          "GEMINI_API_KEY is missing in environment variables."
+        );
       }
 
       const extension =
@@ -406,7 +444,7 @@ app.post(
 
       tempFilePath = path.join(
         os.tmpdir(),
-        `csthub-${Date.now()}${extension}`
+        `csthub-${crypto.randomUUID()}${extension}`
       );
 
       await fs.promises.writeFile(
@@ -423,14 +461,16 @@ app.post(
 
       const interaction =
         await geminiClient.interactions.create({
-          model: "gemini-3.8-flash",
+          model:
+            process.env.GEMINI_MODEL || "gemini-3.8-flash",
           input: [
             {
               type: "text",
               text:
                 "You are CST HUB AI Study Assistant. " +
-                "Answer in simple Bangla.\n\n" +
-                `Student's question:\n${question}`,
+                "Explain the image accurately in simple Bangla. " +
+                "Use easy examples for a diploma student.\n\n" +
+                `Student question: ${question}`,
             },
             {
               type: "image",
@@ -443,10 +483,11 @@ app.post(
       const answer = interaction.output_text;
 
       if (!answer) {
-        return res.status(500).json({
-          success: false,
-          message: "Gemini did not return an answer.",
-        });
+        return sendError(
+          res,
+          502,
+          "AI did not return an answer. Please try again."
+        );
       }
 
       return res.json({
@@ -454,18 +495,15 @@ app.post(
         answer,
       });
     } catch (error) {
-      console.error("❌ Gemini Error:", error);
+      console.error("Gemini error:", error);
 
       return res.status(500).json({
         success: false,
-        message:
-          error?.message || "Failed to analyze image.",
+        message: error.message || "Failed to explain the image.",
       });
     } finally {
       if (tempFilePath) {
-        await fs.promises
-          .unlink(tempFilePath)
-          .catch(() => {});
+        await fs.promises.unlink(tempFilePath).catch(() => {});
       }
     }
   }
@@ -477,7 +515,9 @@ app.post(
 
 const io = new Server(server, {
   cors: {
-    origin: "*",
+    origin: process.env.FRONTEND_URL
+      ? process.env.FRONTEND_URL.split(",").map((url) => url.trim())
+      : "*",
     methods: ["GET", "POST"],
   },
   transports: ["websocket", "polling"],
@@ -486,54 +526,90 @@ const io = new Server(server, {
 const roomUsersMap = new Map();
 
 io.on("connection", (socket) => {
-  console.log("⚡ New user connected:", socket.id);
+  console.log("Study Room connected:", socket.id);
 
   socket.on("join-study-room", (roomId) => {
-    if (typeof roomId !== "string" || !roomId.trim()) {
+    if (
+      typeof roomId !== "string" ||
+      !roomId.trim() ||
+      roomId.length > 150
+    ) {
       return;
     }
 
-    socket.join(roomId);
+    const cleanRoomId = roomId.trim();
 
     const userName =
-      socket.handshake.auth?.userName ||
+      cleanString(socket.handshake.auth?.userName) ||
       `Student_${socket.id.slice(0, 4)}`;
 
-    if (!roomUsersMap.has(roomId)) {
-      roomUsersMap.set(roomId, new Map());
+    // Leave other study rooms before joining another one.
+    for (const oldRoom of socket.rooms) {
+      if (oldRoom === socket.id || oldRoom === cleanRoomId) {
+        continue;
+      }
+
+      const oldUsers = roomUsersMap.get(oldRoom);
+
+      if (oldUsers) {
+        oldUsers.delete(socket.id);
+
+        if (oldUsers.size === 0) {
+          roomUsersMap.delete(oldRoom);
+        } else {
+          io.to(oldRoom).emit("room-users", {
+            users: Array.from(oldUsers.values()),
+          });
+        }
+      }
+
+      socket.leave(oldRoom);
     }
 
-    const roomUsers = roomUsersMap.get(roomId);
+    socket.join(cleanRoomId);
+
+    if (!roomUsersMap.has(cleanRoomId)) {
+      roomUsersMap.set(cleanRoomId, new Map());
+    }
+
+    const roomUsers = roomUsersMap.get(cleanRoomId);
 
     roomUsers.set(socket.id, {
       socketId: socket.id,
       userName,
     });
 
-    io.to(roomId).emit("room-users", {
+    socket.emit("room-users", {
       users: Array.from(roomUsers.values()),
     });
 
-    socket.to(roomId).emit("user-connected", {
+    socket.to(cleanRoomId).emit("user-connected", {
       socketId: socket.id,
       userName,
     });
+
+    // Compatibility with clients that listen for room user count.
+    io.to(cleanRoomId).emit("user-count", roomUsers.size);
   });
 
-  socket.on("offer", ({ target, offer, senderName } = {}) => {
+  socket.on("offer", (payload = {}) => {
+    const { target, offer, senderName } = payload;
+
     if (!target || !offer) return;
 
     io.to(target).emit("offer", {
       offer,
       caller: socket.id,
       callerUserName:
-        senderName ||
-        socket.handshake.auth?.userName ||
+        cleanString(senderName) ||
+        cleanString(socket.handshake.auth?.userName) ||
         "Student",
     });
   });
 
-  socket.on("answer", ({ target, answer } = {}) => {
+  socket.on("answer", (payload = {}) => {
+    const { target, answer } = payload;
+
     if (!target || !answer) return;
 
     io.to(target).emit("answer", {
@@ -542,19 +618,20 @@ io.on("connection", (socket) => {
     });
   });
 
-  socket.on(
-    "ice-candidate",
-    ({ target, candidate } = {}) => {
-      if (!target || !candidate) return;
+  socket.on("ice-candidate", (payload = {}) => {
+    const { target, candidate } = payload;
 
-      io.to(target).emit("ice-candidate", {
-        candidate,
-        sender: socket.id,
-      });
-    }
-  );
+    if (!target || !candidate) return;
 
-  socket.on("chat-message", ({ roomId, text } = {}) => {
+    io.to(target).emit("ice-candidate", {
+      candidate,
+      sender: socket.id,
+    });
+  });
+
+  socket.on("chat-message", (payload = {}) => {
+    const { roomId, text } = payload;
+
     if (
       typeof roomId !== "string" ||
       typeof text !== "string" ||
@@ -563,21 +640,33 @@ io.on("connection", (socket) => {
       return;
     }
 
+    const cleanRoomId = roomId.trim();
+
+    // Only allow chat to rooms the socket has actually joined.
+    if (!socket.rooms.has(cleanRoomId)) {
+      return;
+    }
+
     const userName =
-      socket.handshake.auth?.userName ||
+      cleanString(socket.handshake.auth?.userName) ||
       `Student_${socket.id.slice(0, 4)}`;
 
-    socket.to(roomId).emit("chat-message", {
+    io.to(cleanRoomId).emit("chat-message", {
       sender: userName,
-      text: text.trim(),
+      text: text.trim().slice(0, 2000),
+      socketId: socket.id,
+      createdAt: new Date().toISOString(),
     });
   });
 
   socket.on("disconnecting", () => {
-    socket.rooms.forEach((roomId) => {
-      if (!roomUsersMap.has(roomId)) return;
+    for (const roomId of socket.rooms) {
+      if (roomId === socket.id) continue;
 
       const roomUsers = roomUsersMap.get(roomId);
+
+      if (!roomUsers) continue;
+
       const user = roomUsers.get(socket.id);
 
       roomUsers.delete(socket.id);
@@ -594,7 +683,13 @@ io.on("connection", (socket) => {
           users: Array.from(roomUsers.values()),
         });
       }
-    });
+
+      io.to(roomId).emit("user-count", roomUsers.size);
+    }
+  });
+
+  socket.on("disconnect", (reason) => {
+    console.log("Study Room disconnected:", socket.id, reason);
   });
 });
 
@@ -602,36 +697,45 @@ io.on("connection", (socket) => {
    PDF UPLOAD CONFIGURATION
 ========================================================= */
 
-const storage = multer.diskStorage({
+const pdfStorage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, uploadDir);
   },
 
   filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
+    const originalExtension = path
+      .extname(file.originalname || "")
+      .toLowerCase();
 
-    const originalName = path
-      .basename(file.originalname, ext)
-      .trim()
-      .replace(/\s+/g, "_")
-      .replace(/[^a-zA-Z0-9_-]/g, "");
+    const baseName = path
+      .basename(file.originalname || "document", originalExtension)
+      .replace(/[^a-zA-Z0-9_-]/g, "_")
+      .slice(0, 80);
 
     const uniqueName =
-      `${Date.now()}-${Math.round(Math.random() * 1e9)}-` +
-      `${originalName}${ext}`;
+      `${Date.now()}-${crypto.randomUUID()}-` +
+      `${baseName || "document"}.pdf`;
 
     cb(null, uniqueName);
   },
 });
 
 const upload = multer({
-  storage,
+  storage: pdfStorage,
   limits: {
     fileSize: 60 * 1024 * 1024,
+    files: 1,
   },
   fileFilter: (req, file, cb) => {
-    if (file.mimetype !== "application/pdf") {
-      return cb(new Error("Only PDF files are allowed!"));
+    const extension = path
+      .extname(file.originalname || "")
+      .toLowerCase();
+
+    if (
+      file.mimetype !== "application/pdf" ||
+      extension !== ".pdf"
+    ) {
+      return cb(new Error("Only PDF files are allowed."));
     }
 
     cb(null, true);
@@ -656,53 +760,64 @@ app.post("/students", async (req, res) => {
     } = req.body || {};
 
     if (
-      !name ||
-      !email ||
+      typeof name !== "string" ||
+      typeof email !== "string" ||
+      typeof password !== "string" ||
+      !name.trim() ||
+      !email.trim() ||
       !password ||
       !group ||
-      !roll
+      roll === undefined ||
+      roll === null ||
+      !String(roll).trim()
     ) {
-      return res.status(400).json({
-        success: false,
-        message: "All fields are required!",
-      });
+      return sendError(
+        res,
+        400,
+        "Name, email, password, group and roll are required."
+      );
+    }
+
+    if (password.length < 6) {
+      return sendError(
+        res,
+        400,
+        "Password must be at least 6 characters."
+      );
     }
 
     const cleanName = name.trim();
-    const cleanEmail = email.toLowerCase().trim();
+    const cleanEmail = email.trim().toLowerCase();
     const cleanRoll = String(roll).trim();
+    const cleanGroup = cleanString(group);
 
-    const existingEmail = await studentsCollection.findOne({
-      email: cleanEmail,
+    const existingUser = await studentsCollection.findOne({
+      $or: [
+        { email: cleanEmail },
+        { roll: cleanRoll },
+      ],
     });
 
-    if (existingEmail) {
-      return res.status(409).json({
-        success: false,
-        message: "Email already registered!",
-      });
+    if (existingUser) {
+      if (existingUser.email === cleanEmail) {
+        return sendError(res, 409, "Email already registered.");
+      }
+
+      return sendError(res, 409, "Roll number already registered.");
     }
 
-    const existingRoll = await studentsCollection.findOne({
-      roll: cleanRoll,
-    });
-
-    if (existingRoll) {
-      return res.status(409).json({
-        success: false,
-        message: "Roll number already registered!",
-      });
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashedPassword = await bcrypt.hash(password, 12);
 
     const student = {
       name: cleanName,
       email: cleanEmail,
       password: hashedPassword,
-      group,
+      group: cleanGroup,
       roll: cleanRoll,
-      role: role ? role.toLowerCase().trim() : "student",
+
+      // Role assignment should ideally be controlled by an admin.
+      role: cleanString(role, "student").toLowerCase(),
+
       createdAt: new Date(),
     };
 
@@ -710,18 +825,27 @@ app.post("/students", async (req, res) => {
 
     return res.status(201).json({
       success: true,
-      message: "Student registered successfully!",
+      message: "Student registered successfully.",
       insertedId: result.insertedId,
     });
   } catch (error) {
-    console.error("Register error:", error);
+    console.error("Student registration error:", error);
 
-    return res.status(500).json({
-      success: false,
-      message: "Failed to register student!",
-    });
+    if (error.code === 11000) {
+      return sendError(
+        res,
+        409,
+        "Email or roll number already registered."
+      );
+    }
+
+    return sendError(res, 500, "Failed to register student.");
   }
 });
+
+/* =========================================================
+   STUDENTS - GET ALL
+========================================================= */
 
 app.get("/students", async (req, res) => {
   try {
@@ -738,14 +862,15 @@ app.get("/students", async (req, res) => {
       students,
     });
   } catch (error) {
-    console.error("Fetch students error:", error.message);
+    console.error("Fetch students error:", error);
 
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch students!",
-    });
+    return sendError(res, 500, "Failed to fetch students.");
   }
 });
+
+/* =========================================================
+   STUDENTS - GET ONE
+========================================================= */
 
 app.get("/students/:id", async (req, res) => {
   try {
@@ -753,11 +878,8 @@ app.get("/students/:id", async (req, res) => {
 
     const { id } = req.params;
 
-    if (!isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid student ID!",
-      });
+    if (!validObjectId(id)) {
+      return sendError(res, 400, "Invalid student ID.");
     }
 
     const student = await studentsCollection.findOne(
@@ -766,10 +888,7 @@ app.get("/students/:id", async (req, res) => {
     );
 
     if (!student) {
-      return res.status(404).json({
-        success: false,
-        message: "Student not found!",
-      });
+      return sendError(res, 404, "Student not found.");
     }
 
     return res.json({
@@ -777,14 +896,15 @@ app.get("/students/:id", async (req, res) => {
       student,
     });
   } catch (error) {
-    console.error("Fetch student error:", error.message);
+    console.error("Fetch student error:", error);
 
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch student!",
-    });
+    return sendError(res, 500, "Failed to fetch student.");
   }
 });
+
+/* =========================================================
+   STUDENTS - UPDATE
+========================================================= */
 
 app.patch("/students/:id", async (req, res) => {
   try {
@@ -792,27 +912,43 @@ app.patch("/students/:id", async (req, res) => {
 
     const { id } = req.params;
 
-    if (!isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid student ID!",
-      });
+    if (!validObjectId(id)) {
+      return sendError(res, 400, "Invalid student ID.");
     }
 
     const { name, email, group, roll, role } = req.body || {};
     const updateData = {};
 
-    if (name) updateData.name = name.trim();
-    if (email) updateData.email = email.toLowerCase().trim();
-    if (group) updateData.group = group;
-    if (roll) updateData.roll = String(roll).trim();
-    if (role) updateData.role = role.toLowerCase().trim();
+    if (name !== undefined) {
+      if (typeof name !== "string" || !name.trim()) {
+        return sendError(res, 400, "Invalid name.");
+      }
+
+      updateData.name = name.trim();
+    }
+
+    if (email !== undefined) {
+      if (typeof email !== "string" || !email.trim()) {
+        return sendError(res, 400, "Invalid email.");
+      }
+
+      updateData.email = email.trim().toLowerCase();
+    }
+
+    if (group !== undefined) {
+      updateData.group = cleanString(group);
+    }
+
+    if (roll !== undefined) {
+      updateData.roll = String(roll).trim();
+    }
+
+    if (role !== undefined) {
+      updateData.role = cleanString(role).toLowerCase();
+    }
 
     if (Object.keys(updateData).length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "No fields provided to update.",
-      });
+      return sendError(res, 400, "No valid fields provided.");
     }
 
     const result = await studentsCollection.updateOne(
@@ -821,25 +957,27 @@ app.patch("/students/:id", async (req, res) => {
     );
 
     if (!result.matchedCount) {
-      return res.status(404).json({
-        success: false,
-        message: "Student not found!",
-      });
+      return sendError(res, 404, "Student not found.");
     }
 
     return res.json({
       success: true,
-      message: "Student updated successfully!",
+      message: "Student updated successfully.",
     });
   } catch (error) {
-    console.error("Update student error:", error.message);
+    console.error("Update student error:", error);
 
-    return res.status(500).json({
-      success: false,
-      message: "Failed to update student!",
-    });
+    if (error.code === 11000) {
+      return sendError(res, 409, "Email or roll already exists.");
+    }
+
+    return sendError(res, 500, "Failed to update student.");
   }
 });
+
+/* =========================================================
+   STUDENTS - DELETE
+========================================================= */
 
 app.delete("/students/:id", async (req, res) => {
   try {
@@ -847,11 +985,8 @@ app.delete("/students/:id", async (req, res) => {
 
     const { id } = req.params;
 
-    if (!isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid student ID!",
-      });
+    if (!validObjectId(id)) {
+      return sendError(res, 400, "Invalid student ID.");
     }
 
     const result = await studentsCollection.deleteOne({
@@ -859,23 +994,17 @@ app.delete("/students/:id", async (req, res) => {
     });
 
     if (!result.deletedCount) {
-      return res.status(404).json({
-        success: false,
-        message: "Student not found!",
-      });
+      return sendError(res, 404, "Student not found.");
     }
 
     return res.json({
       success: true,
-      message: "Student deleted successfully!",
+      message: "Student deleted successfully.",
     });
   } catch (error) {
-    console.error("Delete student error:", error.message);
+    console.error("Delete student error:", error);
 
-    return res.status(500).json({
-      success: false,
-      message: "Failed to delete student!",
-    });
+    return sendError(res, 500, "Failed to delete student.");
   }
 });
 
@@ -901,10 +1030,11 @@ app.post("/login", async (req, res) => {
       !emailOrRoll.trim() ||
       !password
     ) {
-      return res.status(400).json({
-        success: false,
-        message: "Name, email/roll and password are required.",
-      });
+      return sendError(
+        res,
+        400,
+        "Name, email/roll and password are required."
+      );
     }
 
     const cleanName = name.trim();
@@ -918,21 +1048,12 @@ app.post("/login", async (req, res) => {
       ],
     });
 
-    if (!student) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid name, email/roll or password.",
-      });
-    }
-
-    if (
-      typeof student.password !== "string" ||
-      !student.password
-    ) {
-      return res.status(401).json({
-        success: false,
-        message: "Account password is not configured.",
-      });
+    if (!student || typeof student.password !== "string") {
+      return sendError(
+        res,
+        401,
+        "Invalid name, email/roll or password."
+      );
     }
 
     const passwordValid = await bcrypt.compare(
@@ -941,17 +1062,14 @@ app.post("/login", async (req, res) => {
     );
 
     if (!passwordValid) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid name, email/roll or password.",
-      });
+      return sendError(
+        res,
+        401,
+        "Invalid name, email/roll or password."
+      );
     }
 
-    const role = String(student.role || "student")
-      .trim()
-      .toLowerCase();
-
-    return res.status(200).json({
+    return res.json({
       success: true,
       message: `Welcome back, ${student.name}!`,
       user: {
@@ -960,17 +1078,14 @@ app.post("/login", async (req, res) => {
         email: student.email || "",
         group: student.group || "All",
         roll: student.roll || "",
-        role,
+        role: cleanString(student.role, "student").toLowerCase(),
         createdAt: student.createdAt || null,
       },
     });
   } catch (error) {
     console.error("Login error:", error);
 
-    return res.status(500).json({
-      success: false,
-      message: "Login failed. Please try again.",
-    });
+    return sendError(res, 500, "Login failed. Please try again.");
   }
 });
 
@@ -992,33 +1107,35 @@ app.post("/notices", async (req, res) => {
 
     if (
       typeof title !== "string" ||
-      typeof description !== "string" ||
       !title.trim() ||
+      typeof description !== "string" ||
       !description.trim()
     ) {
-      return res.status(400).json({
-        success: false,
-        message: "Title and description are required!",
-      });
+      return sendError(
+        res,
+        400,
+        "Notice title and description are required."
+      );
     }
 
     const notice = {
       title: title.trim(),
       description: description.trim(),
-      category: category || "general",
-      publisher: publisher?.trim() || "CR Office",
-      group: group || "All",
+      category: cleanString(category, "general"),
+      publisher: cleanString(publisher, "CR Office"),
+      group: cleanString(group, "All"),
       createdAt: new Date(),
     };
 
     const result = await noticesCollection.insertOne(notice);
 
-    // Notification failure must not undo the saved notice.
-    const notifResult = await sendFCMNotification({
+    // Notification errors are caught by sendFCMNotification.
+    const notification = await sendFCMNotification({
       title: `📌 নতুন নোটিশ: ${notice.title}`,
       message:
-        notice.description.substring(0, 100) +
-        (notice.description.length > 100 ? "..." : ""),
+        notice.description.length > 100
+          ? `${notice.description.slice(0, 100)}...`
+          : notice.description,
       data: {
         type: "notice",
         id: result.insertedId.toString(),
@@ -1027,24 +1144,26 @@ app.post("/notices", async (req, res) => {
       group: notice.group,
     });
 
-    console.log("📢 Notice FCM Result:", notifResult);
-
     return res.status(201).json({
       success: true,
-      message: "Notice published successfully!",
+      message: "Notice published successfully.",
       insertedId: result.insertedId,
-      notice,
-      notification: notifResult,
+      notice: {
+        ...notice,
+        _id: result.insertedId,
+      },
+      notification,
     });
   } catch (error) {
-    console.error("Publish notice error:", error);
+    console.error("Create notice error:", error);
 
-    return res.status(500).json({
-      success: false,
-      message: "Failed to publish notice!",
-    });
+    return sendError(res, 500, "Failed to publish notice.");
   }
 });
+
+/* =========================================================
+   NOTICES - GET ALL
+========================================================= */
 
 app.get("/notices", async (req, res) => {
   try {
@@ -1055,16 +1174,23 @@ app.get("/notices", async (req, res) => {
       .sort({ createdAt: -1 })
       .toArray();
 
+    // Keep this endpoint as an array for compatibility
+    // with the existing frontend.
     return res.json(notices);
   } catch (error) {
-    console.error("Fetch notices error:", error.message);
+    console.error("Fetch notices error:", error);
 
     return res.status(500).json({
       success: false,
-      message: "Failed to fetch notices!",
+      message: "Failed to fetch notices.",
+      notices: [],
     });
   }
 });
+
+/* =========================================================
+   NOTICES - GET ONE
+========================================================= */
 
 app.get("/notices/:id", async (req, res) => {
   try {
@@ -1072,11 +1198,8 @@ app.get("/notices/:id", async (req, res) => {
 
     const { id } = req.params;
 
-    if (!isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid notice ID!",
-      });
+    if (!validObjectId(id)) {
+      return sendError(res, 400, "Invalid notice ID.");
     }
 
     const notice = await noticesCollection.findOne({
@@ -1084,10 +1207,7 @@ app.get("/notices/:id", async (req, res) => {
     });
 
     if (!notice) {
-      return res.status(404).json({
-        success: false,
-        message: "Notice not found!",
-      });
+      return sendError(res, 404, "Notice not found.");
     }
 
     return res.json({
@@ -1095,14 +1215,15 @@ app.get("/notices/:id", async (req, res) => {
       notice,
     });
   } catch (error) {
-    console.error("Fetch notice error:", error.message);
+    console.error("Fetch notice error:", error);
 
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch notice!",
-    });
+    return sendError(res, 500, "Failed to fetch notice.");
   }
 });
+
+/* =========================================================
+   NOTICES - UPDATE
+========================================================= */
 
 app.patch("/notices/:id", async (req, res) => {
   try {
@@ -1110,11 +1231,8 @@ app.patch("/notices/:id", async (req, res) => {
 
     const { id } = req.params;
 
-    if (!isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid notice ID!",
-      });
+    if (!validObjectId(id)) {
+      return sendError(res, 400, "Invalid notice ID.");
     }
 
     const {
@@ -1127,22 +1245,42 @@ app.patch("/notices/:id", async (req, res) => {
 
     const updateData = {};
 
-    if (title !== undefined) updateData.title = title.trim();
+    if (title !== undefined) {
+      if (typeof title !== "string" || !title.trim()) {
+        return sendError(res, 400, "Invalid notice title.");
+      }
+
+      updateData.title = title.trim();
+    }
+
     if (description !== undefined) {
+      if (
+        typeof description !== "string" ||
+        !description.trim()
+      ) {
+        return sendError(res, 400, "Invalid description.");
+      }
+
       updateData.description = description.trim();
     }
-    if (category !== undefined) updateData.category = category;
-    if (publisher !== undefined) {
-      updateData.publisher = publisher.trim();
+
+    if (category !== undefined) {
+      updateData.category = cleanString(category, "general");
     }
-    if (group !== undefined) updateData.group = group;
+
+    if (publisher !== undefined) {
+      updateData.publisher = cleanString(publisher, "CR Office");
+    }
+
+    if (group !== undefined) {
+      updateData.group = cleanString(group, "All");
+    }
 
     if (Object.keys(updateData).length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "No fields provided to update.",
-      });
+      return sendError(res, 400, "No valid fields provided.");
     }
+
+    updateData.updatedAt = new Date();
 
     const result = await noticesCollection.updateOne(
       { _id: new ObjectId(id) },
@@ -1150,25 +1288,23 @@ app.patch("/notices/:id", async (req, res) => {
     );
 
     if (!result.matchedCount) {
-      return res.status(404).json({
-        success: false,
-        message: "Notice not found!",
-      });
+      return sendError(res, 404, "Notice not found.");
     }
 
     return res.json({
       success: true,
-      message: "Notice updated successfully!",
+      message: "Notice updated successfully.",
     });
   } catch (error) {
-    console.error("Update notice error:", error.message);
+    console.error("Update notice error:", error);
 
-    return res.status(500).json({
-      success: false,
-      message: "Failed to update notice!",
-    });
+    return sendError(res, 500, "Failed to update notice.");
   }
 });
+
+/* =========================================================
+   NOTICES - DELETE
+========================================================= */
 
 app.delete("/notices/:id", async (req, res) => {
   try {
@@ -1176,11 +1312,8 @@ app.delete("/notices/:id", async (req, res) => {
 
     const { id } = req.params;
 
-    if (!isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid notice ID!",
-      });
+    if (!validObjectId(id)) {
+      return sendError(res, 400, "Invalid notice ID.");
     }
 
     const result = await noticesCollection.deleteOne({
@@ -1188,31 +1321,27 @@ app.delete("/notices/:id", async (req, res) => {
     });
 
     if (!result.deletedCount) {
-      return res.status(404).json({
-        success: false,
-        message: "Notice not found!",
-      });
+      return sendError(res, 404, "Notice not found.");
     }
 
     return res.json({
       success: true,
-      message: "Notice deleted successfully!",
+      message: "Notice deleted successfully.",
     });
   } catch (error) {
-    console.error("Delete notice error:", error.message);
+    console.error("Delete notice error:", error);
 
-    return res.status(500).json({
-      success: false,
-      message: "Failed to delete notice!",
-    });
+    return sendError(res, 500, "Failed to delete notice.");
   }
 });
 
 /* =========================================================
-   NOTES - PDF UPLOAD
+   NOTES - CREATE / PDF UPLOAD
 ========================================================= */
 
 app.post("/notes", upload.single("file"), async (req, res) => {
+  let savedInDatabase = false;
+
   try {
     await connectDB();
 
@@ -1225,46 +1354,42 @@ app.post("/notes", upload.single("file"), async (req, res) => {
       uploadedBy,
     } = req.body || {};
 
-    if (!title || !title.trim()) {
+    if (typeof title !== "string" || !title.trim()) {
       if (req.file) {
-        await fs.promises
-          .unlink(req.file.path)
-          .catch(() => {});
+        await fs.promises.unlink(req.file.path).catch(() => {});
       }
 
-      return res.status(400).json({
-        success: false,
-        message: "Note title is required!",
-      });
+      return sendError(res, 400, "Note title is required.");
     }
 
     if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        message: "PDF file is required!",
-      });
+      return sendError(
+        res,
+        400,
+        "PDF file is required. Use FormData field name 'file'."
+      );
     }
 
     const note = {
       title: title.trim(),
-      subject: subject?.trim() || "General",
-      description: description?.trim() || "",
-      group: group || "All",
-      semester: semester || "All",
+      subject: cleanString(subject, "General"),
+      description: cleanString(description),
+      group: cleanString(group, "All"),
+      semester: cleanString(semester, "All"),
       fileName: req.file.filename,
       originalName: req.file.originalname,
       filePath: `/uploads/${req.file.filename}`,
       fileSize: req.file.size,
-      uploadedBy: uploadedBy?.trim() || "Anonymous",
+      uploadedBy: cleanString(uploadedBy, "Anonymous"),
       uploadedByEmail: "",
       createdAt: new Date(),
     };
 
     const result = await notesCollection.insertOne(note);
+    savedInDatabase = true;
 
-    // Notification failure must not undo the saved PDF.
-    const notifResult = await sendFCMNotification({
-      title: `📚 নতুন নোট আপলোড হয়েছে: ${note.title}`,
+    const notification = await sendFCMNotification({
+      title: `📚 নতুন নোট: ${note.title}`,
       message:
         `Subject: ${note.subject} | Semester: ${note.semester}`,
       data: {
@@ -1275,30 +1400,33 @@ app.post("/notes", upload.single("file"), async (req, res) => {
       group: note.group,
     });
 
-    console.log("📚 Note FCM Result:", notifResult);
-
     return res.status(201).json({
       success: true,
-      message: "Note uploaded successfully!",
+      message: "Note uploaded successfully.",
       insertedId: result.insertedId,
-      note,
-      notification: notifResult,
+      note: {
+        ...note,
+        _id: result.insertedId,
+      },
+      notification,
     });
   } catch (error) {
-    console.error("Notes upload error:", error);
+    console.error("Upload note error:", error);
 
-    if (req.file) {
-      await fs.promises
-        .unlink(req.file.path)
-        .catch(() => {});
+    if (req.file && !savedInDatabase) {
+      await fs.promises.unlink(req.file.path).catch(() => {});
     }
 
     return res.status(500).json({
       success: false,
-      message: error?.message || "Failed to upload note!",
+      message: error.message || "Failed to upload note.",
     });
   }
 });
+
+/* =========================================================
+   NOTES - GET ALL
+========================================================= */
 
 app.get("/notes", async (req, res) => {
   try {
@@ -1309,31 +1437,33 @@ app.get("/notes", async (req, res) => {
       .sort({ createdAt: -1 })
       .toArray();
 
-    return res.json({
+    return res.status(200).json({
       success: true,
-      notes,
+      notes: Array.isArray(notes) ? notes : [],
     });
   } catch (error) {
-    console.error("Fetch notes error:", error.message);
+    console.error("Fetch notes error:", error);
 
     return res.status(500).json({
       success: false,
-      message: "Failed to fetch notes!",
+      message: "Failed to fetch notes.",
+      notes: [],
     });
   }
 });
 
-app.delete("/notes/:id", async (req, res) => {
+/* =========================================================
+   NOTES - GET ONE
+========================================================= */
+
+app.get("/notes/:id", async (req, res) => {
   try {
     await connectDB();
 
     const { id } = req.params;
 
-    if (!isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid note ID!",
-      });
+    if (!validObjectId(id)) {
+      return sendError(res, 400, "Invalid note ID.");
     }
 
     const note = await notesCollection.findOne({
@@ -1341,42 +1471,73 @@ app.delete("/notes/:id", async (req, res) => {
     });
 
     if (!note) {
-      return res.status(404).json({
-        success: false,
-        message: "Note not found!",
-      });
+      return sendError(res, 404, "Note not found.");
     }
-
-    if (note.fileName) {
-      const filePath = path.join(uploadDir, note.fileName);
-
-      if (fs.existsSync(filePath)) {
-        await fs.promises
-          .unlink(filePath)
-          .catch(() => {});
-      }
-    }
-
-    await notesCollection.deleteOne({
-      _id: new ObjectId(id),
-    });
 
     return res.json({
       success: true,
-      message: "Note deleted successfully!",
+      note,
     });
   } catch (error) {
-    console.error("Delete note error:", error.message);
+    console.error("Fetch note error:", error);
 
-    return res.status(500).json({
-      success: false,
-      message: "Failed to delete note!",
-    });
+    return sendError(res, 500, "Failed to fetch note.");
   }
 });
 
 /* =========================================================
-   MULTER ERROR HANDLER
+   NOTES - DELETE
+========================================================= */
+
+app.delete("/notes/:id", async (req, res) => {
+  try {
+    await connectDB();
+
+    const { id } = req.params;
+
+    if (!validObjectId(id)) {
+      return sendError(res, 400, "Invalid note ID.");
+    }
+
+    const note = await notesCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!note) {
+      return sendError(res, 404, "Note not found.");
+    }
+
+    const result = await notesCollection.deleteOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!result.deletedCount) {
+      return sendError(res, 404, "Note not found.");
+    }
+
+    if (note.fileName) {
+      const filePath = path.join(uploadDir, path.basename(note.fileName));
+
+      await fs.promises.unlink(filePath).catch((error) => {
+        if (error.code !== "ENOENT") {
+          console.error("Could not remove PDF:", error.message);
+        }
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "Note deleted successfully.",
+    });
+  } catch (error) {
+    console.error("Delete note error:", error);
+
+    return sendError(res, 500, "Failed to delete note.");
+  }
+});
+
+/* =========================================================
+   MULTER AND GLOBAL ERROR HANDLER
 ========================================================= */
 
 app.use((error, req, res, next) => {
@@ -1385,38 +1546,58 @@ app.use((error, req, res, next) => {
   }
 
   if (error instanceof multer.MulterError) {
-    return res.status(400).json({
-      success: false,
-      message:
-        error.code === "LIMIT_FILE_SIZE"
-          ? "Uploaded file is too large."
-          : error.message,
-    });
+    if (error.code === "LIMIT_FILE_SIZE") {
+      return sendError(
+        res,
+        413,
+        "File is too large. Maximum size is 60 MB for PDFs and 10 MB for images."
+      );
+    }
+
+    return sendError(res, 400, error.message);
   }
 
-  if (
-    error.message === "Only PDF files are allowed!" ||
-    error.message ===
-      "Only JPG, PNG and WEBP images are allowed!"
-  ) {
-    return res.status(400).json({
-      success: false,
-      message: error.message,
-    });
+  const allowedFileErrors = [
+    "Only PDF files are allowed.",
+    "Only JPG, PNG and WEBP images are allowed.",
+  ];
+
+  if (allowedFileErrors.includes(error.message)) {
+    return sendError(res, 400, error.message);
   }
 
-  console.error("Unhandled error:", error);
+  console.error("Unhandled server error:", error);
 
-  return res.status(500).json({
-    success: false,
-    message: "Internal server error.",
-  });
+  return sendError(res, 500, "Internal server error.");
 });
 
 /* =========================================================
-   SERVER START
+   START SERVER
 ========================================================= */
 
-server.listen(port, () => {
-  console.log(`🚀 CST HUB backend running on port ${port}`);
+async function startServer() {
+  try {
+    await connectDB();
+
+    server.listen(PORT, () => {
+      console.log(`CST HUB backend running on port ${PORT}`);
+    });
+  } catch (error) {
+    console.error("Initial MongoDB connection failed:", error.message);
+
+    // Keep the server alive so health checks and error responses
+    // remain available while MongoDB is temporarily unreachable.
+    server.listen(PORT, () => {
+      console.log(
+        `CST HUB backend listening on port ${PORT}; database is unavailable.`
+      );
+    });
+  }
+}
+
+startServer();
+
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled promise rejection:", reason);
 });
+
