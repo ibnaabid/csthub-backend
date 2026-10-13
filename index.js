@@ -1,6 +1,5 @@
 const dotenv = require("dotenv");
 dotenv.config();
-
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
@@ -9,10 +8,8 @@ const fs = require("fs");
 const os = require("os");
 const http = require("http");
 const bcrypt = require("bcryptjs");
-
 const { Server } = require("socket.io");
 const { GoogleGenAI } = require("@google/genai");
-
 const {
   MongoClient,
   ServerApiVersion,
@@ -21,20 +18,17 @@ const {
 
 const app = express();
 const server = http.createServer(app);
-
 const port = process.env.PORT || 8000;
 
 /* =========================================================
    MIDDLEWARE
 ========================================================= */
-
 app.use(
   cors({
     origin: "*",
     methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
   })
 );
-
 app.use(
   express.json({
     limit: "60mb",
@@ -42,33 +36,26 @@ app.use(
 );
 
 /* =========================================================
-   ONESIGNAL NOTIFICATION HELPER
+   ONESIGNAL NOTIFICATION HELPER (শুধু এইটাই রাখো)
 ========================================================= */
-
 async function sendOneSignalNotification({
   title,
   message,
   data = {},
+  group = "All",
 }) {
+  const appId = process.env.ONESIGNAL_APP_ID;
+  const apiKey = process.env.KEY_ID;
+
+  if (!appId || !apiKey) {
+    console.error("❌ OneSignal credentials missing! ONESIGNAL_APP_ID বা KEY_ID চেক করো।");
+    return { success: false, reason: "missing_credentials" };
+  }
+
   try {
-    const appId = process.env.ONESIGNAL_APP_ID || process.env.ONESIGNAL_APP_ID_2;
-    const apiKey =
-      process.env.KEY_ID ||
-      process.env.KEY_ID;
-
-    if (!appId || !apiKey) {
-      console.error(
-        "OneSignal credentials missing. Check Render Environment Variables."
-      );
-
-      return {
-        success: false,
-        reason: "missing_credentials",
-      };
-    }
-
     const payload = {
       app_id: appId,
+      target_channel: "push",
       included_segments: ["Subscribed Users"],
       headings: {
         en: title || "CST Hub Update",
@@ -76,30 +63,29 @@ async function sendOneSignalNotification({
       contents: {
         en: message || "A new update is available on CST Hub.",
       },
-      data,
       url: "https://cst-hub.vercel.app",
+      data: {
+        ...data,
+        group,
+      },
     };
 
-    const response = await fetch(
-      "https://api.onesignal.com/notifications",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Key ${apiKey}`,
-        },
-        body: JSON.stringify(payload),
-      }
-    );
+    const response = await fetch("https://api.onesignal.com/notifications", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Key ${apiKey}`,
+      },
+      body: JSON.stringify(payload),
+    });
 
-    const result = await response.json();
+    const result = await response.json().catch(() => ({}));
+
+    console.log("📲 OneSignal Status:", response.status);
+    console.log("📲 OneSignal Response:", result);
 
     if (!response.ok || result.errors) {
-      console.error("OneSignal API failed:", {
-        status: response.status,
-        result,
-      });
-
+      console.error("❌ OneSignal API failed:", result);
       return {
         success: false,
         status: response.status,
@@ -107,27 +93,21 @@ async function sendOneSignalNotification({
       };
     }
 
-    console.log("OneSignal notification accepted:", result);
-
+    console.log(`✅ Notification sent! Recipients: ${result.recipients}`);
     return {
       success: true,
       id: result.id,
       recipients: result.recipients,
     };
   } catch (error) {
-    console.error("OneSignal notification error:", error.message);
-
-    return {
-      success: false,
-      error: error.message,
-    };
+    console.error("❌ OneSignal notification error:", error.message);
+    return { success: false, error: error.message };
   }
 }
 
 /* =========================================================
    UPLOAD FOLDER
 ========================================================= */
-
 const uploadDir =
   process.env.NODE_ENV === "production"
     ? path.join(os.tmpdir(), "csthub-uploads")
@@ -139,15 +119,11 @@ if (!fs.existsSync(uploadDir)) {
   });
 }
 
-app.use(
-  "/uploads",
-  express.static(uploadDir)
-);
+app.use("/uploads", express.static(uploadDir));
 
 /* =========================================================
    HOME
 ========================================================= */
-
 app.get("/", (req, res) => {
   res.json({
     success: true,
@@ -159,7 +135,6 @@ app.get("/", (req, res) => {
 /* =========================================================
    GEMINI
 ========================================================= */
-
 const geminiClient = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
 });
@@ -189,7 +164,8 @@ app.post(
         });
       }
 
-      const question = req.body.question?.trim() || "এই ছবিটা সহজভাবে বুঝিয়ে দাও।";
+      const question =
+        req.body.question?.trim() || "এই ছবিটা সহজভাবে বুঝিয়ে দাও।";
 
       if (process.env.MOCK_GEMINI === "true") {
         await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -199,8 +175,17 @@ app.post(
         });
       }
 
-      const extension = req.file.mimetype === "image/png" ? ".png" : req.file.mimetype === "image/webp" ? ".webp" : ".jpg";
-      tempFilePath = path.join(os.tmpdir(), `csthub-${Date.now()}${extension}`);
+      const extension =
+        req.file.mimetype === "image/png"
+          ? ".png"
+          : req.file.mimetype === "image/webp"
+          ? ".webp"
+          : ".jpg";
+
+      tempFilePath = path.join(
+        os.tmpdir(),
+        `csthub-${Date.now()}${extension}`
+      );
       await fs.promises.writeFile(tempFilePath, req.file.buffer);
 
       const uploadedFile = await geminiClient.files.upload({
@@ -224,14 +209,21 @@ app.post(
       });
 
       const answer = interaction.output_text;
+
       if (!answer) {
-        return res.status(500).json({ success: false, message: "Gemini did not return an answer." });
+        return res.status(500).json({
+          success: false,
+          message: "Gemini did not return an answer.",
+        });
       }
 
       return res.json({ success: true, answer });
     } catch (error) {
       console.error("❌ Gemini Error:", error);
-      return res.status(500).json({ success: false, message: error?.message || "Failed to analyze image." });
+      return res.status(500).json({
+        success: false,
+        message: error?.message || "Failed to analyze image.",
+      });
     } finally {
       if (tempFilePath) {
         await fs.promises.unlink(tempFilePath).catch(() => {});
@@ -243,7 +235,6 @@ app.post(
 /* =========================================================
    SOCKET.IO STUDY ROOM
 ========================================================= */
-
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
   transports: ["websocket", "polling"],
@@ -256,7 +247,6 @@ io.on("connection", (socket) => {
 
   socket.on("join-study-room", (roomId) => {
     socket.join(roomId);
-
     const userName =
       socket.handshake.auth?.userName || `Student_${socket.id.slice(0, 4)}`;
 
@@ -268,8 +258,8 @@ io.on("connection", (socket) => {
     roomUsers.set(socket.id, { socketId: socket.id, userName });
 
     const usersArray = Array.from(roomUsers.values());
-
     io.to(roomId).emit("room-users", { users: usersArray });
+
     socket.to(roomId).emit("user-connected", {
       socketId: socket.id,
       userName,
@@ -301,7 +291,6 @@ io.on("connection", (socket) => {
   socket.on("chat-message", ({ roomId, text }) => {
     const userName =
       socket.handshake.auth?.userName || `Student_${socket.id.slice(0, 4)}`;
-
     socket.to(roomId).emit("chat-message", {
       sender: userName,
       text,
@@ -313,7 +302,6 @@ io.on("connection", (socket) => {
       if (roomUsersMap.has(roomId)) {
         const roomUsers = roomUsersMap.get(roomId);
         const user = roomUsers.get(socket.id);
-
         roomUsers.delete(socket.id);
 
         if (roomUsers.size === 0) {
@@ -323,7 +311,6 @@ io.on("connection", (socket) => {
             socketId: socket.id,
             userName: user?.userName || "User",
           });
-
           io.to(roomId).emit("room-users", {
             users: Array.from(roomUsers.values()),
           });
@@ -336,13 +323,20 @@ io.on("connection", (socket) => {
 /* =========================================================
    MULTER PDF
 ========================================================= */
-
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => { cb(null, uploadDir); },
+  destination: (req, file, cb) => {
+    cb(null, uploadDir);
+  },
   filename: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
-    const originalName = path.basename(file.originalname, ext).trim().replace(/\s+/g, "_").replace(/[^a-zA-Z0-9_-]/g, "");
-    const uniqueName = `${Date.now()}-${Math.round(Math.random() * 1e9)}-${originalName}${ext}`;
+    const originalName = path
+      .basename(file.originalname, ext)
+      .trim()
+      .replace(/\s+/g, "_")
+      .replace(/[^a-zA-Z0-9_-]/g, "");
+    const uniqueName = `${Date.now()}-${Math.round(
+      Math.random() * 1e9
+    )}-${originalName}${ext}`;
     cb(null, uniqueName);
   },
 });
@@ -361,7 +355,6 @@ const upload = multer({
 /* =========================================================
    MONGODB
 ========================================================= */
-
 const uri = process.env.MONGODB_URI;
 let client;
 let studentsCollection;
@@ -377,16 +370,18 @@ async function connectDB() {
   }
 
   client = new MongoClient(uri, {
-    serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true },
+    serverApi: {
+      version: ServerApiVersion.v1,
+      strict: true,
+      deprecationErrors: true,
+    },
   });
 
   await client.connect();
   const db = client.db("CST");
-
   studentsCollection = db.collection("students");
   noticesCollection = db.collection("notices");
   notesCollection = db.collection("notes");
-
   dbReady = true;
   console.log("✅ Connected to MongoDB");
 }
@@ -396,28 +391,40 @@ const isValidObjectId = (id) => ObjectId.isValid(id);
 /* =========================================================
    STUDENTS (REGISTER)
 ========================================================= */
-
 app.post("/students", async (req, res) => {
   try {
     await connectDB();
     const { name, email, password, group, roll, role } = req.body;
 
     if (!name || !email || !password || !group || !roll) {
-      return res.status(400).json({ success: false, message: "All fields are required!" });
+      return res.status(400).json({
+        success: false,
+        message: "All fields are required!",
+      });
     }
 
     const cleanName = name.trim();
     const cleanEmail = email.toLowerCase().trim();
     const cleanRoll = roll.trim();
 
-    const existingEmail = await studentsCollection.findOne({ email: cleanEmail });
+    const existingEmail = await studentsCollection.findOne({
+      email: cleanEmail,
+    });
     if (existingEmail) {
-      return res.status(409).json({ success: false, message: "Email already registered!" });
+      return res.status(409).json({
+        success: false,
+        message: "Email already registered!",
+      });
     }
 
-    const existingRoll = await studentsCollection.findOne({ roll: cleanRoll });
+    const existingRoll = await studentsCollection.findOne({
+      roll: cleanRoll,
+    });
     if (existingRoll) {
-      return res.status(409).json({ success: false, message: "Roll number already registered!" });
+      return res.status(409).json({
+        success: false,
+        message: "Roll number already registered!",
+      });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -441,17 +448,27 @@ app.post("/students", async (req, res) => {
     });
   } catch (error) {
     console.error("Register error:", error);
-    res.status(500).json({ success: false, message: "Failed to register student!" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to register student!",
+    });
   }
 });
 
 app.get("/students", async (req, res) => {
   try {
     await connectDB();
-    const students = await studentsCollection.find({}).sort({ createdAt: -1 }).project({ password: 0 }).toArray();
+    const students = await studentsCollection
+      .find({})
+      .sort({ createdAt: -1 })
+      .project({ password: 0 })
+      .toArray();
     res.json({ success: true, students });
   } catch (error) {
-    res.status(500).json({ success: false, message: "Failed to fetch students!" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch students!",
+    });
   }
 });
 
@@ -459,14 +476,29 @@ app.get("/students/:id", async (req, res) => {
   try {
     await connectDB();
     const { id } = req.params;
-    if (!isValidObjectId(id)) return res.status(400).json({ success: false, message: "Invalid student ID!" });
+    if (!isValidObjectId(id))
+      return res.status(400).json({
+        success: false,
+        message: "Invalid student ID!",
+      });
 
-    const student = await studentsCollection.findOne({ _id: new ObjectId(id) }, { projection: { password: 0 } });
-    if (!student) return res.status(404).json({ success: false, message: "Student not found!" });
+    const student = await studentsCollection.findOne(
+      { _id: new ObjectId(id) },
+      { projection: { password: 0 } }
+    );
+
+    if (!student)
+      return res.status(404).json({
+        success: false,
+        message: "Student not found!",
+      });
 
     res.json({ success: true, student });
   } catch (error) {
-    res.status(500).json({ success: false, message: "Failed to fetch student!" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch student!",
+    });
   }
 });
 
@@ -474,7 +506,11 @@ app.patch("/students/:id", async (req, res) => {
   try {
     await connectDB();
     const { id } = req.params;
-    if (!isValidObjectId(id)) return res.status(400).json({ success: false, message: "Invalid student ID!" });
+    if (!isValidObjectId(id))
+      return res.status(400).json({
+        success: false,
+        message: "Invalid student ID!",
+      });
 
     const { name, email, group, roll, role } = req.body;
     const updateData = {};
@@ -484,12 +520,26 @@ app.patch("/students/:id", async (req, res) => {
     if (roll) updateData.roll = roll.trim();
     if (role) updateData.role = role.toLowerCase().trim();
 
-    const result = await studentsCollection.updateOne({ _id: new ObjectId(id) }, { $set: updateData });
-    if (!result.matchedCount) return res.status(404).json({ success: false, message: "Student not found!" });
+    const result = await studentsCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updateData }
+    );
 
-    res.json({ success: true, message: "Student updated successfully!" });
+    if (!result.matchedCount)
+      return res.status(404).json({
+        success: false,
+        message: "Student not found!",
+      });
+
+    res.json({
+      success: true,
+      message: "Student updated successfully!",
+    });
   } catch (error) {
-    res.status(500).json({ success: false, message: "Failed to update student!" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to update student!",
+    });
   }
 });
 
@@ -497,25 +547,40 @@ app.delete("/students/:id", async (req, res) => {
   try {
     await connectDB();
     const { id } = req.params;
-    if (!isValidObjectId(id)) return res.status(400).json({ success: false, message: "Invalid student ID!" });
+    if (!isValidObjectId(id))
+      return res.status(400).json({
+        success: false,
+        message: "Invalid student ID!",
+      });
 
-    const result = await studentsCollection.deleteOne({ _id: new ObjectId(id) });
-    if (!result.deletedCount) return res.status(404).json({ success: false, message: "Student not found!" });
+    const result = await studentsCollection.deleteOne({
+      _id: new ObjectId(id),
+    });
 
-    res.json({ success: true, message: "Student deleted successfully!" });
+    if (!result.deletedCount)
+      return res.status(404).json({
+        success: false,
+        message: "Student not found!",
+      });
+
+    res.json({
+      success: true,
+      message: "Student deleted successfully!",
+    });
   } catch (error) {
-    res.status(500).json({ success: false, message: "Failed to delete student!" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete student!",
+    });
   }
 });
 
 /* =========================================================
-   LOGIN (JWT REMOVED COMPLETELY)
+   LOGIN
 ========================================================= */
-
 app.post("/login", async (req, res) => {
   try {
     await connectDB();
-
     if (!studentsCollection) {
       return res.status(503).json({
         success: false,
@@ -557,20 +622,14 @@ app.post("/login", async (req, res) => {
       });
     }
 
-    if (
-      typeof student.password !== "string" ||
-      !student.password
-    ) {
+    if (typeof student.password !== "string" || !student.password) {
       return res.status(401).json({
         success: false,
         message: "Account password is not configured.",
       });
     }
 
-    const passwordValid = await bcrypt.compare(
-      password,
-      student.password
-    );
+    const passwordValid = await bcrypt.compare(password, student.password);
 
     if (!passwordValid) {
       return res.status(401).json({
@@ -583,7 +642,6 @@ app.post("/login", async (req, res) => {
       .trim()
       .toLowerCase();
 
-    // টোকেন জেনারেশনের অংশ পুরোপুরি বাদ দিয়ে সরাসরি ইউজার ডাটা রেসপন্স দেওয়া হচ্ছে
     return res.status(200).json({
       success: true,
       message: `Welcome back, ${student.name}!`,
@@ -599,7 +657,6 @@ app.post("/login", async (req, res) => {
     });
   } catch (error) {
     console.error("Login error:", error);
-
     return res.status(500).json({
       success: false,
       message: "Login failed. Please try again.",
@@ -610,14 +667,16 @@ app.post("/login", async (req, res) => {
 /* =========================================================
    NOTICES
 ========================================================= */
-
 app.post("/notices", async (req, res) => {
   try {
     await connectDB();
     const { title, description, category, publisher, group } = req.body;
 
     if (!title || !description) {
-      return res.status(400).json({ success: false, message: "Title and description are required!" });
+      return res.status(400).json({
+        success: false,
+        message: "Title and description are required!",
+      });
     }
 
     const notice = {
@@ -631,31 +690,50 @@ app.post("/notices", async (req, res) => {
 
     const result = await noticesCollection.insertOne(notice);
 
-    sendOneSignalNotification({
+    // ===== নোটিফিকেশন পাঠানো =====
+    const notifResult = await sendOneSignalNotification({
       title: `📌 নতুন নোটিশ: ${notice.title}`,
-      message: notice.description.substring(0, 100) + "...",
-      data: { type: "notice", id: result.insertedId.toString() },
+      message:
+        notice.description.substring(0, 100) +
+        (notice.description.length > 100 ? "..." : ""),
+      data: {
+        type: "notice",
+        id: result.insertedId.toString(),
+      },
+      group: notice.group || "All",
     });
+
+    console.log("📢 Notice Notification Result:", notifResult);
 
     res.status(201).json({
       success: true,
       message: "Notice published successfully!",
       insertedId: result.insertedId,
       notice,
+      notification: notifResult,
     });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ success: false, message: "Failed to publish notice!" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to publish notice!",
+    });
   }
 });
 
 app.get("/notices", async (req, res) => {
   try {
     await connectDB();
-    const notices = await noticesCollection.find({}).sort({ createdAt: -1 }).toArray();
+    const notices = await noticesCollection
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
     res.json(notices);
   } catch (error) {
-    res.status(500).json({ success: false, message: "Failed to fetch notices!" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch notices!",
+    });
   }
 });
 
@@ -663,14 +741,28 @@ app.get("/notices/:id", async (req, res) => {
   try {
     await connectDB();
     const { id } = req.params;
-    if (!isValidObjectId(id)) return res.status(400).json({ success: false, message: "Invalid notice ID!" });
+    if (!isValidObjectId(id))
+      return res.status(400).json({
+        success: false,
+        message: "Invalid notice ID!",
+      });
 
-    const notice = await noticesCollection.findOne({ _id: new ObjectId(id) });
-    if (!notice) return res.status(404).json({ success: false, message: "Notice not found!" });
+    const notice = await noticesCollection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!notice)
+      return res.status(404).json({
+        success: false,
+        message: "Notice not found!",
+      });
 
     res.json({ success: true, notice });
   } catch (error) {
-    res.status(500).json({ success: false, message: "Failed to fetch notice!" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch notice!",
+    });
   }
 });
 
@@ -678,23 +770,41 @@ app.patch("/notices/:id", async (req, res) => {
   try {
     await connectDB();
     const { id } = req.params;
-    if (!isValidObjectId(id)) return res.status(400).json({ success: false, message: "Invalid notice ID!" });
+    if (!isValidObjectId(id))
+      return res.status(400).json({
+        success: false,
+        message: "Invalid notice ID!",
+      });
 
     const { title, description, category, publisher, group } = req.body;
     const updateData = {};
-
     if (title !== undefined) updateData.title = title.trim();
-    if (description !== undefined) updateData.description = description.trim();
+    if (description !== undefined)
+      updateData.description = description.trim();
     if (category !== undefined) updateData.category = category;
     if (publisher !== undefined) updateData.publisher = publisher.trim();
     if (group !== undefined) updateData.group = group;
 
-    const result = await noticesCollection.updateOne({ _id: new ObjectId(id) }, { $set: updateData });
-    if (!result.matchedCount) return res.status(404).json({ success: false, message: "Notice not found!" });
+    const result = await noticesCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updateData }
+    );
 
-    res.json({ success: true, message: "Notice updated successfully!" });
+    if (!result.matchedCount)
+      return res.status(404).json({
+        success: false,
+        message: "Notice not found!",
+      });
+
+    res.json({
+      success: true,
+      message: "Notice updated successfully!",
+    });
   } catch (error) {
-    res.status(500).json({ success: false, message: "Failed to update notice!" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to update notice!",
+    });
   }
 });
 
@@ -702,83 +812,118 @@ app.delete("/notices/:id", async (req, res) => {
   try {
     await connectDB();
     const { id } = req.params;
-    if (!isValidObjectId(id)) return res.status(400).json({ success: false, message: "Invalid notice ID!" });
+    if (!isValidObjectId(id))
+      return res.status(400).json({
+        success: false,
+        message: "Invalid notice ID!",
+      });
 
-    const result = await noticesCollection.deleteOne({ _id: new ObjectId(id) });
-    if (!result.deletedCount) return res.status(404).json({ success: false, message: "Notice not found!" });
+    const result = await noticesCollection.deleteOne({
+      _id: new ObjectId(id),
+    });
 
-    res.json({ success: true, message: "Notice deleted successfully!" });
+    if (!result.deletedCount)
+      return res.status(404).json({
+        success: false,
+        message: "Notice not found!",
+      });
+
+    res.json({
+      success: true,
+      message: "Notice deleted successfully!",
+    });
   } catch (error) {
-    res.status(500).json({ success: false, message: "Failed to delete notice!" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete notice!",
+    });
   }
 });
 
 /* =========================================================
    NOTES (PDF UPLOAD)
 ========================================================= */
+app.post("/notes", upload.single("file"), async (req, res) => {
+  try {
+    await connectDB();
+    const { title, subject, description, group, semester, uploadedBy } =
+      req.body;
 
-app.post(
-  "/notes",
-  upload.single("file"),
-  async (req, res) => {
-    try {
-      await connectDB();
-
-      const { title, subject, description, group, semester, uploadedBy } = req.body;
-
-      if (!title) {
-        if (req.file) await fs.promises.unlink(req.file.path).catch(() => {});
-        return res.status(400).json({ success: false, message: "Note title is required!" });
-      }
-
-      if (!req.file) {
-        return res.status(400).json({ success: false, message: "PDF file is required!" });
-      }
-
-      const note = {
-        title: title.trim(),
-        subject: subject?.trim() || "General",
-        description: description?.trim() || "",
-        group: group || "All",
-        semester: semester || "All",
-        fileName: req.file.filename,
-        originalName: req.file.originalname,
-        filePath: `/uploads/${req.file.filename}`,
-        fileSize: req.file.size,
-        uploadedBy: uploadedBy?.trim() || "Anonymous",
-        uploadedByEmail: "",
-        createdAt: new Date(),
-      };
-
-      const result = await notesCollection.insertOne(note);
-
-      sendOneSignalNotification({
-        title: `📚 নতুন নোট আপলোড হয়েছে: ${note.title}`,
-        message: `विषय (Subject): ${note.subject} | সেমিস্টার: ${note.semester}`,
-        data: { type: "note", id: result.insertedId.toString() },
-      });
-
-      res.status(201).json({
-        success: true,
-        message: "Note uploaded successfully!",
-        insertedId: result.insertedId,
-        note,
-      });
-    } catch (error) {
-      console.error("Notes upload error:", error);
+    if (!title) {
       if (req.file) await fs.promises.unlink(req.file.path).catch(() => {});
-      res.status(500).json({ success: false, message: error?.message || "Failed to upload note!" });
+      return res.status(400).json({
+        success: false,
+        message: "Note title is required!",
+      });
     }
+
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "PDF file is required!",
+      });
+    }
+
+    const note = {
+      title: title.trim(),
+      subject: subject?.trim() || "General",
+      description: description?.trim() || "",
+      group: group || "All",
+      semester: semester || "All",
+      fileName: req.file.filename,
+      originalName: req.file.originalname,
+      filePath: `/uploads/${req.file.filename}`,
+      fileSize: req.file.size,
+      uploadedBy: uploadedBy?.trim() || "Anonymous",
+      uploadedByEmail: "",
+      createdAt: new Date(),
+    };
+
+    const result = await notesCollection.insertOne(note);
+
+    // ===== নোটিফিকেশন পাঠানো =====
+    const notifResult = await sendOneSignalNotification({
+      title: `📚 নতুন নোট আপলোড হয়েছে: ${note.title}`,
+      message: `Subject: ${note.subject} | Semester: ${note.semester}`,
+      data: {
+        type: "note",
+        id: result.insertedId.toString(),
+      },
+      group: note.group || "All",
+    });
+
+    console.log("📚 Note Notification Result:", notifResult);
+
+    res.status(201).json({
+      success: true,
+      message: "Note uploaded successfully!",
+      insertedId: result.insertedId,
+      note,
+      notification: notifResult,
+    });
+  } catch (error) {
+    console.error("Notes upload error:", error);
+    if (req.file) await fs.promises.unlink(req.file.path).catch(() => {});
+    res.status(500).json({
+      success: false,
+      message: error?.message || "Failed to upload note!",
+    });
   }
-);
+});
 
 app.get("/notes", async (req, res) => {
   try {
     await connectDB();
-    const notes = await notesCollection.find({}).sort({ createdAt: -1 }).toArray();
+    const notes = await notesCollection
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
     res.json({ success: true, notes });
   } catch (error) {
-    res.status(500).json({ success: false, message: "Failed to fetch notes!" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch notes!",
+    });
   }
 });
 
@@ -786,12 +931,23 @@ app.delete("/notes/:id", async (req, res) => {
   try {
     await connectDB();
     const { id } = req.params;
-    if (!isValidObjectId(id)) return res.status(400).json({ success: false, message: "Invalid note ID!" });
+    if (!isValidObjectId(id))
+      return res.status(400).json({
+        success: false,
+        message: "Invalid note ID!",
+      });
 
-    const note = await notesCollection.findOne({ _id: new ObjectId(id) });
-    if (!note) return res.status(404).json({ success: false, message: "Note not found!" });
+    const note = await notesCollection.findOne({
+      _id: new ObjectId(id),
+    });
 
-    Profile:
+    if (!note)
+      return res.status(404).json({
+        success: false,
+        message: "Note not found!",
+      });
+
+    // ফাইল ডিলিট
     if (note.fileName) {
       const filePath = path.join(uploadDir, note.fileName);
       if (fs.existsSync(filePath)) {
@@ -801,16 +957,21 @@ app.delete("/notes/:id", async (req, res) => {
 
     await notesCollection.deleteOne({ _id: new ObjectId(id) });
 
-    res.json({ success: true, message: "Note deleted successfully!" });
+    res.json({
+      success: true,
+      message: "Note deleted successfully!",
+    });
   } catch (error) {
-    res.status(500).json({ success: false, message: "Failed to delete note!" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete note!",
+    });
   }
 });
 
 /* =========================================================
    SERVER LISTENING
 ========================================================= */
-
 server.listen(port, () => {
   console.log(`🚀 Server is running on port ${port}`);
 });
