@@ -200,20 +200,33 @@ app.get("/health", async (req, res) => {
    FIREBASE CLOUD MESSAGING
 ========================================================= */
 
+
+/* =========================================================
+   FIREBASE CLOUD MESSAGING — FIXED
+========================================================= */
+
 async function sendFCMNotification({
   title = "CST Hub",
-  message = "নতুন আপডেট এসেছে।",
+  message = "CST Hub-এ নতুন আপডেট এসেছে।",
   data = {},
   group = "All",
 }) {
+  const result = {
+    success: false,
+    sent: 0,
+    failed: 0,
+    total: 0,
+    group: cleanString(group, "All"),
+  };
+
   try {
     if (admin.apps.length === 0) {
-      console.error("❌ Firebase Admin is not initialized.");
+      console.error(
+        "❌ FCM disabled: Firebase Admin is not initialized."
+      );
 
       return {
-        success: false,
-        sent: 0,
-        failed: 0,
+        ...result,
         reason: "firebase_not_initialized",
       };
     }
@@ -221,102 +234,116 @@ async function sendFCMNotification({
     await connectDB();
 
     const targetGroup = cleanString(group, "All");
+    const normalizedGroup = targetGroup.toLowerCase();
 
-    // All notice -> all devices
-    // Group A notice -> Group A + All devices
-    // Group B notice -> Group B + All devices
+    // Match Group A / Group B tokens plus tokens subscribed to All.
+    // A notice assigned to All targets every registered token.
     const query =
-      targetGroup.toLowerCase() === "all"
+      normalizedGroup === "all"
         ? {}
         : {
-            $or: [
-              { group: targetGroup },
-              { group: "All" },
-            ],
+            $expr: {
+              $in: [
+                {
+                  $toLower: {
+                    $ifNull: ["$group", "all"],
+                  },
+                },
+                [normalizedGroup, "all"],
+              ],
+            },
           };
 
-    const records = await fcmTokensCollection.find(query).toArray();
+    const records = await fcmTokensCollection
+      .find(query)
+      .toArray();
 
-    if (!records.length) {
-      console.log("ℹ️ No subscribed devices for group:", targetGroup);
+    result.total = records.length;
+
+    if (records.length === 0) {
+      console.warn(
+        `⚠️ No FCM tokens found for group "${targetGroup}".`
+      );
 
       return {
+        ...result,
         success: true,
-        sent: 0,
-        failed: 0,
-        message: "No subscribed devices found.",
+        message: "No subscribed devices found for this group.",
       };
     }
-
-    let sent = 0;
-    let failed = 0;
 
     const invalidTokenCodes = new Set([
       "messaging/registration-token-not-registered",
       "messaging/invalid-registration-token",
     ]);
 
+    const notificationTitle = String(title || "CST Hub");
+    const notificationBody = String(
+      message || "CST Hub-এ নতুন আপডেট এসেছে।"
+    );
+    const notificationUrl = String(
+      data?.url || "https://cst-hub.vercel.app"
+    );
+
+    // FCM data payload values must be strings.
+    const messageData = {};
+
+    for (const [key, value] of Object.entries(data || {})) {
+      if (value !== undefined && value !== null) {
+        messageData[key] = String(value);
+      }
+    }
+
+    messageData.title = notificationTitle;
+    messageData.body = notificationBody;
+    messageData.url = notificationUrl;
+
     for (const record of records) {
       if (!record.token) {
-        failed++;
+        result.failed++;
         continue;
       }
-
-      const notificationTitle = String(title);
-      const notificationBody = String(message);
-      const notificationUrl = String(
-        data.url || "https://cst-hub.vercel.app"
-      );
-
-      // FCM data values must all be strings.
-      const messageData = {};
-
-      for (const [key, value] of Object.entries(data)) {
-        if (value !== undefined && value !== null) {
-          messageData[key] = String(value);
-        }
-      }
-
-      messageData.title = notificationTitle;
-      messageData.body = notificationBody;
-      messageData.url = notificationUrl;
 
       try {
         await admin.messaging().send({
           token: record.token,
 
-          // Display notification when app is in the background.
+          // Notification for background/closed browser states.
           notification: {
             title: notificationTitle,
             body: notificationBody,
           },
 
+          // Extra information for frontend click/navigation logic.
           data: messageData,
 
           webpush: {
             headers: {
               Urgency: "high",
             },
-
             notification: {
               title: notificationTitle,
               body: notificationBody,
               icon: "https://cst-hub.vercel.app/icon.png",
+              data: {
+                url: notificationUrl,
+                type: messageData.type || "update",
+                id: messageData.id || "",
+              },
             },
-
             fcmOptions: {
               link: notificationUrl,
             },
           },
         });
 
-        sent++;
+        result.sent++;
 
         console.log(
-          `✅ FCM sent to group: ${record.group || "All"}`
+          `✅ FCM accepted | group=${record.group || "All"}`
         );
       } catch (error) {
-        failed++;
+        result.failed++;
 
         console.error(
           "❌ FCM send failed:",
@@ -328,7 +355,7 @@ async function sendFCMNotification({
             .deleteOne({ _id: record._id })
             .catch((deleteError) => {
               console.error(
-                "Failed to delete invalid token:",
+                "Invalid token cleanup failed:",
                 deleteError.message
               );
             });
@@ -336,28 +363,28 @@ async function sendFCMNotification({
       }
     }
 
-    const result = {
-      success: failed === 0,
-      sent,
-      failed,
-      total: records.length,
-      group: targetGroup,
-    };
+    result.success = result.failed === 0;
 
-    console.log("📱 FCM notification result:", result);
+    console.log("📣 FCM summary:", {
+      success: result.success,
+      sent: result.sent,
+      failed: result.failed,
+      total: result.total,
+      group: result.group,
+    });
 
     return result;
   } catch (error) {
-    console.error("❌ FCM notification error:", error);
+    console.error("❌ FCM notification system error:", error);
 
     return {
+      ...result,
       success: false,
-      sent: 0,
-      failed: 0,
       error: error.message,
     };
   }
 }
+
 
 /* =========================================================
    FCM DEVICE SUBSCRIPTION
