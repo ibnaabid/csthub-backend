@@ -62,26 +62,55 @@ app.use("/uploads", express.static(uploadDir));
    FIREBASE ADMIN
 ========================================================= */
 
+
+/* =========================================================
+   FIREBASE ADMIN — VALIDATED INITIALIZATION
+========================================================= */
+
+let firebaseInitialized = false;
+
 try {
-  const serviceAccountJSON =
+  const rawServiceAccount =
     process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
 
-  if (serviceAccountJSON && admin.apps.length === 0) {
-    const serviceAccount = JSON.parse(serviceAccountJSON);
-
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-    });
-
-    console.log("Firebase Admin initialized.");
-  } else if (!serviceAccountJSON) {
-    console.warn(
-      "FIREBASE_SERVICE_ACCOUNT_JSON is missing. Push notifications are disabled."
+  if (!rawServiceAccount) {
+    throw new Error(
+      "FIREBASE_SERVICE_ACCOUNT_JSON is missing."
     );
   }
+
+  const serviceAccount = JSON.parse(rawServiceAccount);
+
+  const projectId = serviceAccount.project_id;
+  const clientEmail = serviceAccount.client_email;
+  const privateKey = serviceAccount.private_key;
+
+  if (!projectId || !clientEmail || !privateKey) {
+    throw new Error(
+      "Service account JSON is incomplete. Required fields: project_id, client_email, private_key."
+    );
+  }
+
+  if (admin.apps.length === 0) {
+    admin.initializeApp({
+      credential: admin.credential.cert({
+        projectId,
+        clientEmail,
+        privateKey: privateKey.replace(/\\n/g, "\n"),
+      }),
+    });
+  }
+
+  firebaseInitialized = true;
+  console.log("Firebase Admin initialized successfully.");
 } catch (error) {
-  console.error("Firebase initialization failed:", error.message);
+  firebaseInitialized = false;
+  console.error(
+    "Firebase initialization failed:",
+    error.message
+  );
 }
+
 
 /* =========================================================
    MONGODB
@@ -390,25 +419,44 @@ async function sendFCMNotification({
    FCM DEVICE SUBSCRIPTION
 ========================================================= */
 
+
+/* =========================================================
+   FCM DEVICE SUBSCRIPTION
+========================================================= */
+
+
+/* =========================================================
+   FCM DEVICE SUBSCRIPTION
+========================================================= */
+
 app.post("/notifications/subscribe", async (req, res) => {
   try {
     await connectDB();
 
-    const { token, group = "All" } = req.body || {};
+    if (!fcmTokensCollection) {
+      return sendError(res, 503, "Notification database is unavailable.");
+    }
 
-    if (typeof token !== "string" || !token.trim()) {
+    const token =
+      typeof req.body?.token === "string"
+        ? req.body.token.trim()
+        : "";
+
+    const group =
+      typeof req.body?.group === "string" && req.body.group.trim()
+        ? req.body.group.trim()
+        : "All";
+
+    if (!token) {
       return sendError(res, 400, "A valid FCM token is required.");
     }
 
-    const cleanToken = token.trim();
-    const cleanGroup = cleanString(group, "All");
-
     await fcmTokensCollection.updateOne(
-      { token: cleanToken },
+      { token },
       {
         $set: {
-          token: cleanToken,
-          group: cleanGroup,
+          token,
+          group,
           updatedAt: new Date(),
         },
         $setOnInsert: {
@@ -423,16 +471,11 @@ app.post("/notifications/subscribe", async (req, res) => {
       message: "Device subscribed successfully.",
     });
   } catch (error) {
-    console.error("FCM subscription error:", error);
+    console.error("FCM subscription error:", error.message);
 
-    return sendError(
-      res,
-      500,
-      "Failed to subscribe to notifications."
-    );
+    return sendError(res, 500, "Failed to subscribe to notifications.");
   }
 });
-
 /* =========================================================
    GEMINI AI IMAGE EXPLANATION
 ========================================================= */
