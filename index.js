@@ -1,4 +1,3 @@
-
 const dotenv = require("dotenv");
 dotenv.config();
 
@@ -59,11 +58,6 @@ fs.mkdirSync(uploadDir, { recursive: true });
 app.use("/uploads", express.static(uploadDir));
 
 /* =========================================================
-   FIREBASE ADMIN
-========================================================= */
-
-
-/* =========================================================
    FIREBASE ADMIN — VALIDATED INITIALIZATION
 ========================================================= */
 
@@ -110,7 +104,6 @@ try {
     error.message
   );
 }
-
 
 /* =========================================================
    MONGODB
@@ -226,11 +219,6 @@ app.get("/health", async (req, res) => {
 });
 
 /* =========================================================
-   FIREBASE CLOUD MESSAGING
-========================================================= */
-
-
-/* =========================================================
    FIREBASE CLOUD MESSAGING — FIXED
 ========================================================= */
 
@@ -265,8 +253,6 @@ async function sendFCMNotification({
     const targetGroup = cleanString(group, "All");
     const normalizedGroup = targetGroup.toLowerCase();
 
-    // Match Group A / Group B tokens plus tokens subscribed to All.
-    // A notice assigned to All targets every registered token.
     const query =
       normalizedGroup === "all"
         ? {}
@@ -314,7 +300,6 @@ async function sendFCMNotification({
       data?.url || "https://cst-hub.vercel.app"
     );
 
-    // FCM data payload values must be strings.
     const messageData = {};
 
     for (const [key, value] of Object.entries(data || {})) {
@@ -337,13 +322,11 @@ async function sendFCMNotification({
         await admin.messaging().send({
           token: record.token,
 
-          // Notification for background/closed browser states.
           notification: {
             title: notificationTitle,
             body: notificationBody,
           },
 
-          // Extra information for frontend click/navigation logic.
           data: messageData,
 
           webpush: {
@@ -414,17 +397,6 @@ async function sendFCMNotification({
   }
 }
 
-
-/* =========================================================
-   FCM DEVICE SUBSCRIPTION
-========================================================= */
-
-
-/* =========================================================
-   FCM DEVICE SUBSCRIPTION
-========================================================= */
-
-
 /* =========================================================
    FCM DEVICE SUBSCRIPTION
 ========================================================= */
@@ -454,12 +426,7 @@ app.post("/notifications/subscribe", async (req, res) => {
     await fcmTokensCollection.updateOne(
       { token },
       {
-        $set: {
-          token,
-          group,
-          updatedAt: new Date(),
-        },
-        $setOnInsert: {
+        $set: { token, group, updatedAt: new Date(), },$setOnInsert: {
           createdAt: new Date(),
         },
       },
@@ -476,6 +443,7 @@ app.post("/notifications/subscribe", async (req, res) => {
     return sendError(res, 500, "Failed to subscribe to notifications.");
   }
 });
+
 /* =========================================================
    GEMINI AI IMAGE EXPLANATION
 ========================================================= */
@@ -648,7 +616,6 @@ io.on("connection", (socket) => {
       cleanString(socket.handshake.auth?.userName) ||
       `Student_${socket.id.slice(0, 4)}`;
 
-    // Leave other study rooms before joining another one.
     for (const oldRoom of socket.rooms) {
       if (oldRoom === socket.id || oldRoom === cleanRoomId) {
         continue;
@@ -693,7 +660,6 @@ io.on("connection", (socket) => {
       userName,
     });
 
-    // Compatibility with clients that listen for room user count.
     io.to(cleanRoomId).emit("user-count", roomUsers.size);
   });
 
@@ -747,7 +713,6 @@ io.on("connection", (socket) => {
 
     const cleanRoomId = roomId.trim();
 
-    // Only allow chat to rooms the socket has actually joined.
     if (!socket.rooms.has(cleanRoomId)) {
       return;
     }
@@ -919,10 +884,7 @@ app.post("/students", async (req, res) => {
       password: hashedPassword,
       group: cleanGroup,
       roll: cleanRoll,
-
-      // Role assignment should ideally be controlled by an admin.
       role: cleanString(role, "student").toLowerCase(),
-
       createdAt: new Date(),
     };
 
@@ -1234,7 +1196,6 @@ app.post("/notices", async (req, res) => {
 
     const result = await noticesCollection.insertOne(notice);
 
-    // Notification errors are caught by sendFCMNotification.
     const notification = await sendFCMNotification({
       title: `📌 নতুন নোটিশ: ${notice.title}`,
       message:
@@ -1279,8 +1240,6 @@ app.get("/notices", async (req, res) => {
       .sort({ createdAt: -1 })
       .toArray();
 
-    // Keep this endpoint as an array for compatibility
-    // with the existing frontend.
     return res.json(notices);
   } catch (error) {
     console.error("Fetch notices error:", error);
@@ -1352,17 +1311,14 @@ app.patch("/notices/:id", async (req, res) => {
 
     if (title !== undefined) {
       if (typeof title !== "string" || !title.trim()) {
-        return sendError(res, 400, "Invalid notice title.");
+        return sendError(res, 400, "Invalid title.");
       }
 
       updateData.title = title.trim();
     }
 
     if (description !== undefined) {
-      if (
-        typeof description !== "string" ||
-        !description.trim()
-      ) {
+      if (typeof description !== "string" || !description.trim()) {
         return sendError(res, 400, "Invalid description.");
       }
 
@@ -1384,8 +1340,6 @@ app.patch("/notices/:id", async (req, res) => {
     if (Object.keys(updateData).length === 0) {
       return sendError(res, 400, "No valid fields provided.");
     }
-
-    updateData.updatedAt = new Date();
 
     const result = await noticesCollection.updateOne(
       { _id: new ObjectId(id) },
@@ -1441,62 +1395,54 @@ app.delete("/notices/:id", async (req, res) => {
 });
 
 /* =========================================================
-   NOTES - CREATE / PDF UPLOAD
+   NOTES - CREATE (UPLOAD PDF)
 ========================================================= */
 
-app.post("/notes", upload.single("file"), async (req, res) => {
-  let savedInDatabase = false;
-
+app.post("/notes", upload.single("pdf"), async (req, res) => {
   try {
     await connectDB();
 
-    const {
-      title,
-      subject,
-      description,
-      group,
-      semester,
-      uploadedBy,
-    } = req.body || {};
-
-    if (typeof title !== "string" || !title.trim()) {
-      if (req.file) {
-        await fs.promises.unlink(req.file.path).catch(() => {});
-      }
-
-      return sendError(res, 400, "Note title is required.");
-    }
+    const { title, subject, semester, uploader, group } = req.body || {};
 
     if (!req.file) {
+      return sendError(res, 400, "Please upload a PDF file.");
+    }
+
+    if (
+      typeof title !== "string" ||
+      !title.trim() ||
+      typeof subject !== "string" ||
+      !subject.trim()
+    ) {
+      await fs.promises.unlink(req.file.path).catch(() => {});
+
       return sendError(
         res,
         400,
-        "PDF file is required. Use FormData field name 'file'."
+        "Note title and subject are required."
       );
     }
 
+    const fileUrl = `/uploads/${req.file.filename}`;
+
     const note = {
       title: title.trim(),
-      subject: cleanString(subject, "General"),
-      description: cleanString(description),
+      subject: subject.trim(),
+      semester: cleanString(semester, "1st"),
+      uploader: cleanString(uploader, "Anonymous"),
       group: cleanString(group, "All"),
-      semester: cleanString(semester, "All"),
+      fileUrl,
       fileName: req.file.filename,
       originalName: req.file.originalname,
-      filePath: `/uploads/${req.file.filename}`,
       fileSize: req.file.size,
-      uploadedBy: cleanString(uploadedBy, "Anonymous"),
-      uploadedByEmail: "",
       createdAt: new Date(),
     };
 
     const result = await notesCollection.insertOne(note);
-    savedInDatabase = true;
 
     const notification = await sendFCMNotification({
       title: `📚 নতুন নোট: ${note.title}`,
-      message:
-        `Subject: ${note.subject} | Semester: ${note.semester}`,
+      message: ` বিষয়: ${note.subject} (${note.semester} Semester)`,
       data: {
         type: "note",
         id: result.insertedId.toString(),
@@ -1518,14 +1464,15 @@ app.post("/notes", upload.single("file"), async (req, res) => {
   } catch (error) {
     console.error("Upload note error:", error);
 
-    if (req.file && !savedInDatabase) {
+    if (req.file?.path) {
       await fs.promises.unlink(req.file.path).catch(() => {});
     }
 
-    return res.status(500).json({
-      success: false,
-      message: error.message || "Failed to upload note.",
-    });
+    return sendError(
+      res,
+      500,
+      error.message || "Failed to upload note."
+    );
   }
 });
 
@@ -1542,10 +1489,7 @@ app.get("/notes", async (req, res) => {
       .sort({ createdAt: -1 })
       .toArray();
 
-    return res.status(200).json({
-      success: true,
-      notes: Array.isArray(notes) ? notes : [],
-    });
+    return res.json(notes);
   } catch (error) {
     console.error("Fetch notes error:", error);
 
@@ -1612,23 +1556,12 @@ app.delete("/notes/:id", async (req, res) => {
       return sendError(res, 404, "Note not found.");
     }
 
-    const result = await notesCollection.deleteOne({
-      _id: new ObjectId(id),
-    });
-
-    if (!result.deletedCount) {
-      return sendError(res, 404, "Note not found.");
-    }
-
     if (note.fileName) {
-      const filePath = path.join(uploadDir, path.basename(note.fileName));
-
-      await fs.promises.unlink(filePath).catch((error) => {
-        if (error.code !== "ENOENT") {
-          console.error("Could not remove PDF:", error.message);
-        }
-      });
+      const filePath = path.join(uploadDir, note.fileName);
+      await fs.promises.unlink(filePath).catch(() => {});
     }
+
+    await notesCollection.deleteOne({ _id: new ObjectId(id) });
 
     return res.json({
       success: true,
@@ -1642,67 +1575,26 @@ app.delete("/notes/:id", async (req, res) => {
 });
 
 /* =========================================================
-   MULTER AND GLOBAL ERROR HANDLER
+   GLOBAL ERROR HANDLER & SERVER START
 ========================================================= */
 
-app.use((error, req, res, next) => {
-  if (res.headersSent) {
-    return next(error);
-  }
+app.use((err, req, res, next) => {
+  console.error("Global error handler caught:", err);
 
-  if (error instanceof multer.MulterError) {
-    if (error.code === "LIMIT_FILE_SIZE") {
-      return sendError(
-        res,
-        413,
-        "File is too large. Maximum size is 60 MB for PDFs and 10 MB for images."
-      );
+  if (err instanceof multer.MulterError) {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return sendError(res, 400, "File is too large.");
     }
-
-    return sendError(res, 400, error.message);
+    return sendError(res, 400, err.message);
   }
 
-  const allowedFileErrors = [
-    "Only PDF files are allowed.",
-    "Only JPG, PNG and WEBP images are allowed.",
-  ];
-
-  if (allowedFileErrors.includes(error.message)) {
-    return sendError(res, 400, error.message);
-  }
-
-  console.error("Unhandled server error:", error);
-
-  return sendError(res, 500, "Internal server error.");
+  return sendError(
+    res,
+    500,
+    err.message || "Internal server error."
+  );
 });
 
-/* =========================================================
-   START SERVER
-========================================================= */
-
-async function startServer() {
-  try {
-    await connectDB();
-
-    server.listen(PORT, () => {
-      console.log(`CST HUB backend running on port ${PORT}`);
-    });
-  } catch (error) {
-    console.error("Initial MongoDB connection failed:", error.message);
-
-    // Keep the server alive so health checks and error responses
-    // remain available while MongoDB is temporarily unreachable.
-    server.listen(PORT, () => {
-      console.log(
-        `CST HUB backend listening on port ${PORT}; database is unavailable.`
-      );
-    });
-  }
-}
-
-startServer();
-
-process.on("unhandledRejection", (reason) => {
-  console.error("Unhandled promise rejection:", reason);
+server.listen(PORT, () => {
+  console.log(`CST HUB Backend running on port ${PORT}`);
 });
-
